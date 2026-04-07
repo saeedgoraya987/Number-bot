@@ -40,28 +40,45 @@ async function createWASession(userId, phoneNumber) {
     logger: pino({ level: "silent" }),
     browser: ["Ubuntu", "Chrome", "20.0.04"],
     syncFullHistory: false,
+    mobile: false,
   });
 
   waSessions[userId] = { sock, isConnected: false };
   sock.ev.on("creds.update", saveCreds);
-  sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
-    if (connection === "open") {
-      waSessions[userId].isConnected = true;
-      console.log(`✅ WA connected: user ${userId}`);
-    } else if (connection === "close") {
-      waSessions[userId].isConnected = false;
-      const code = lastDisconnect?.error?.output?.statusCode;
-      if (code === DisconnectReason.loggedOut || code === 401) {
-        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
-        delete waSessions[userId];
-        console.log(`🔴 WA logged out: user ${userId}`);
+
+  // QR আসার সময় pairing code চাই — এটাই সঠিক moment
+  const pairingCode = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Timeout: WA server respond করেনি")), 30000);
+
+    sock.ev.on("connection.update", async ({ connection, qr, lastDisconnect }) => {
+      if (qr) {
+        // QR generate হয়েছে মানে socket ready — এখনই pairing code চাই
+        clearTimeout(timeout);
+        try {
+          const code = await sock.requestPairingCode(phoneNumber.replace(/\D/g, ""));
+          resolve(code);
+        } catch(e) {
+          reject(e);
+        }
       }
-    }
+
+      if (connection === "open") {
+        clearTimeout(timeout);
+        waSessions[userId].isConnected = true;
+        console.log(`✅ WA connected: user ${userId}`);
+      } else if (connection === "close") {
+        waSessions[userId].isConnected = false;
+        const code = lastDisconnect?.error?.output?.statusCode;
+        if (code === DisconnectReason.loggedOut || code === 401) {
+          try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
+          delete waSessions[userId];
+          console.log(`🔴 WA logged out: user ${userId}`);
+        }
+      }
+    });
   });
 
-  await new Promise(r => setTimeout(r, 3000));
-  const code = await sock.requestPairingCode(phoneNumber.replace(/\D/g, ""));
-  return code;
+  return pairingCode;
 }
 
 function isWAConnected(userId) {
