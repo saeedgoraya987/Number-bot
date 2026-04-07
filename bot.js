@@ -44,7 +44,7 @@ async function createWASession(userId, phoneNumber) {
     },
     printQRInTerminal: false,
     logger: pino({ level: "silent" }),
-    browser: Browsers.ubuntu("Chrome"), // ✅ Baileys built-in browser — pairing এ এটাই কাজ করে
+    browser: Browsers.macOS("Safari"), // macOS Safari = WA notification trigger করে
     syncFullHistory: false,
   });
 
