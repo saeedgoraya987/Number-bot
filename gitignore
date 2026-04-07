@@ -1,0 +1,7 @@
+node_modules/
+*.json
+!package.json
+wa_sessions/
+numbers.txt
+*.log
+.env
