@@ -58,17 +58,14 @@ const WA_SESSIONS_DIR = path.join(DATA_DIR, "wa_sessions");
 if (!fs.existsSync(WA_SESSIONS_DIR)) fs.mkdirSync(WA_SESSIONS_DIR, { recursive: true });
 
 async function createWASession(userId, phoneNumber) {
+  // আগের socket বন্ধ করো কিন্তু session folder রাখো
   if (waSessions[userId]?.sock) {
     try { waSessions[userId].sock.end(); } catch(e) {}
     delete waSessions[userId];
   }
 
   const sessionDir = path.join(WA_SESSIONS_DIR, userId.toString());
-  // পুরনো session মুছো — না মুছলে WA নতুন pairing accept করে না
-  if (fs.existsSync(sessionDir)) {
-    try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
-  }
-  fs.mkdirSync(sessionDir, { recursive: true });
+  if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
   const { version } = await fetchLatestBaileysVersion();
@@ -84,6 +81,7 @@ async function createWASession(userId, phoneNumber) {
     browser: ["Ubuntu", "Chrome", "20.0.04"],
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
+    connectTimeoutMs: 60000,
   });
 
   waSessions[userId] = { sock, isConnected: false };
@@ -104,7 +102,12 @@ async function createWASession(userId, phoneNumber) {
     }
   });
 
-  // QR event = WA server ready → এই মুহূর্তেই pairing code চাইতে হবে
+  // ✅ creds.registered check — already registered হলে pairing code চাওয়ার দরকার নেই
+  if (sock.authState.creds.registered) {
+    console.log(`ℹ️ Already registered, no pairing needed: user ${userId}`);
+    return null; // caller এটা handle করবে
+  }
+
   return await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error("Timeout — আবার try করো।"));
@@ -113,16 +116,15 @@ async function createWASession(userId, phoneNumber) {
     let requested = false;
 
     sock.ev.on("connection.update", async ({ qr }) => {
-      if (qr && !requested) {
+      // QR event = WA server ready + not registered → pairing code চাও
+      if (qr && !requested && !sock.authState.creds.registered) {
         requested = true;
         clearTimeout(timer);
         try {
           const phone = phoneNumber.replace(/\D/g, "");
           console.log(`📱 Requesting pairing code: ${phone}`);
-          // ছোট delay — WA server QR process করার সময় দাও
-          await new Promise(r => setTimeout(r, 500));
           const code = await sock.requestPairingCode(phone);
-          console.log(`🔑 Code received: ${code}`);
+          console.log(`🔑 Code: ${code}`);
           resolve(code);
         } catch (e) {
           console.error("Pairing error:", e.message);
@@ -3980,17 +3982,28 @@ bot.on("text", async (ctx, next) => {
       const loadMsg = await ctx.reply("⏳ *Connecting to WhatsApp...*", { parse_mode: "Markdown" });
       try {
         const rawCode = await createWASession(userId, phone);
-        const code = rawCode.match(/.{1,4}/g)?.join("-") || rawCode;
         await ctx.telegram.deleteMessage(ctx.chat.id, loadMsg.message_id).catch(() => {});
+
+        // null = already registered/connected
+        if (!rawCode) {
+          return await ctx.reply(
+            "✅ *WhatsApp already connected!*\n\nতোমার WA session active আছে।",
+            { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "✅ Check Status", callback_data: "wa_status" }]] } }
+          );
+        }
+
+        const code = rawCode.replace(/\W/g, ""); // dash ছাড়া clean code
+        const display = code.match(/.{1,4}/g)?.join("-") || code;
         await ctx.reply(
           `🔑 *WhatsApp Pairing Code*\n\n` +
-          `\`${code}\`\n\n` +
           `📋 *Steps:*\n` +
           `1. WhatsApp খোলো\n` +
           `2. Settings → Linked Devices\n` +
           `3. Link a Device → *Link with phone number*\n` +
-          `4. উপরের code টা enter করো\n\n` +
-          `⏰ ১ মিনিটের মধ্যে expire হবে।`,
+          `4. নিচের code enter করো *(dash ছাড়া)*\n\n` +
+          `\`${code}\`\n` +
+          `_(${display})_\n\n` +
+          `⏰ ২ মিনিটের মধ্যে enter করো!`,
           {
             parse_mode: "Markdown",
             reply_markup: {
