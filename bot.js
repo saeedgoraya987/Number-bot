@@ -70,6 +70,9 @@ async function createWASession(userId, phoneNumber) {
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
   const { version } = await fetchLatestBaileysVersion();
 
+  // ✅ phone number পরিষ্কার করো
+  const cleanPhone = phoneNumber.replace(/\D/g, "");
+
   const sock = makeWASocket({
     version,
     auth: {
@@ -78,10 +81,11 @@ async function createWASession(userId, phoneNumber) {
     },
     printQRInTerminal: false,
     logger: pino({ level: "silent" }),
-    browser: ["Ubuntu", "Chrome", "20.0.04"],
+    browser: ["", "", ""],
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
     connectTimeoutMs: 60000,
+    mobile: false,
   });
 
   waSessions[userId] = { sock, isConnected: false };
@@ -121,9 +125,9 @@ async function createWASession(userId, phoneNumber) {
         requested = true;
         clearTimeout(timer);
         try {
-          const phone = phoneNumber.replace(/\D/g, "");
-          console.log(`📱 Requesting pairing code: ${phone}`);
-          const code = await sock.requestPairingCode(phone);
+          await new Promise(r => setTimeout(r, 5000));
+          console.log(`📱 Requesting pairing code: ${cleanPhone}`);
+          const code = await sock.requestPairingCode(cleanPhone);
           console.log(`🔑 Code: ${code}`);
           resolve(code);
         } catch (e) {
