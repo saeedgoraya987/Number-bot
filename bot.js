@@ -958,6 +958,7 @@ bot.use((ctx, next) => {
       withdrawState: null,
       withdrawData: null,
       waConnectState: null
+    };
   }
 
   if (ctx.from && !ctx.session.isAdmin) {
@@ -3976,6 +3977,8 @@ bot.on("text", async (ctx, next) => {
       }
       return;
     }
+
+    const KEYBOARD_BUTTONS = [
       "☎️ Get Number", "📞 Get Numbers",
       "📧 Get Tempmail", "📧 Temp Mail",
       "🔐 2FA", "🔐 2FA Codes",
