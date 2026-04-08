@@ -1,3 +1,6 @@
+/******************** CRYPTO POLYFILL (required for Baileys on Node 18) ********************/
+globalThis.crypto = require("crypto").webcrypto;
+
 /******************** IMPORTS ********************/
 const { Telegraf, session } = require("telegraf");
 const fs = require("fs");
@@ -5,7 +8,7 @@ const path = require("path");
 const https = require("https");
 const { authenticator } = require("otplib");
 
-/******************** WHATSAPP CHECK ********************/
+/******************** BAILEYS WHATSAPP ********************/
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -14,141 +17,6 @@ const {
   makeCacheableSignalKeyStore,
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
-
-const waSessions = {}; // { userId: { sock, isConnected } }
-
-async function createWASession(userId, phoneNumber) {
-  if (waSessions[userId]?.sock) {
-    try { waSessions[userId].sock.end(); } catch(e) {}
-    delete waSessions[userId];
-  }
-
-  const WA_SESSIONS_DIR = path.join(DATA_DIR, "wa_sessions");
-  if (!fs.existsSync(WA_SESSIONS_DIR)) fs.mkdirSync(WA_SESSIONS_DIR, { recursive: true });
-  const sessionDir = path.join(WA_SESSIONS_DIR, userId.toString());
-
-  // পুরনো session সবসময় delete করো — না হলে pairing code কাজ করে না
-  try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
-  fs.mkdirSync(sessionDir, { recursive: true });
-
-  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-  const { version } = await fetchLatestBaileysVersion();
-
-  const sock = makeWASocket({
-    version,
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
-    },
-    printQRInTerminal: false,
-    logger: pino({ level: "silent" }),
-    browser: ["Chrome (Linux)", "", ""],
-    syncFullHistory: false,
-    mobile: false,
-    generateHighQualityLinkPreview: false,
-  });
-
-  waSessions[userId] = { sock, isConnected: false };
-  sock.ev.on("creds.update", saveCreds);
-
-  sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
-    if (connection === "open") {
-      waSessions[userId].isConnected = true;
-      console.log(`✅ WA connected: user ${userId}`);
-    } else if (connection === "close") {
-      waSessions[userId].isConnected = false;
-      const sc = lastDisconnect?.error?.output?.statusCode;
-      if (sc === DisconnectReason.loggedOut || sc === 401) {
-        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
-        delete waSessions[userId];
-        console.log(`🔴 WA logged out: user ${userId}`);
-      }
-    }
-  });
-
-  const cleanPhone = phoneNumber.replace(/\D/g, "");
-  console.log(`📱 Requesting pairing code for: ${cleanPhone}`);
-
-  // creds.registered === false হলেই pairing code request করো
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Timeout: WA server respond করেনি")), 60000);
-
-    const tryRequest = async () => {
-      try {
-        if (!sock.authState.creds.registered) {
-          const code = await sock.requestPairingCode(cleanPhone);
-          clearTimeout(timeout);
-          console.log(`🔑 Pairing code: ${code}`);
-          resolve(code);
-        } else {
-          clearTimeout(timeout);
-          reject(new Error("Already registered"));
-        }
-      } catch(e) {
-        clearTimeout(timeout);
-        console.error("Pairing code error:", e.message);
-        reject(e);
-      }
-    };
-
-    setTimeout(tryRequest, 2000);
-  });
-}
-
-function isWAConnected(userId) {
-  return waSessions[userId]?.isConnected === true;
-}
-
-async function checkWANumbers(userId, numbers) {
-  if (!isWAConnected(userId)) return {};
-  const sock = waSessions[userId].sock;
-  const results = {};
-  await Promise.all(numbers.map(async (num) => {
-    try {
-      const jid = num.replace(/\D/g, "") + "@s.whatsapp.net";
-      const [res] = await sock.onWhatsApp(jid);
-      results[num] = res?.exists === true;
-    } catch(e) { results[num] = null; }
-  }));
-  return results;
-}
-
-async function restoreWASessions() {
-  const WA_SESSIONS_DIR = path.join(DATA_DIR, "wa_sessions");
-  if (!fs.existsSync(WA_SESSIONS_DIR)) return;
-  for (const uid of fs.readdirSync(WA_SESSIONS_DIR)) {
-    const sessionDir = path.join(WA_SESSIONS_DIR, uid);
-    if (!fs.existsSync(path.join(sessionDir, "creds.json"))) continue;
-    try {
-      const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-      const { version } = await fetchLatestBaileysVersion();
-      const sock = makeWASocket({
-        version,
-        auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })) },
-        printQRInTerminal: false,
-        logger: pino({ level: "silent" }),
-        browser: ["Ubuntu", "Chrome", "20.0.04"],
-        syncFullHistory: false,
-      });
-      waSessions[uid] = { sock, isConnected: false };
-      sock.ev.on("creds.update", saveCreds);
-      sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
-        if (connection === "open") {
-          waSessions[uid].isConnected = true;
-          console.log(`✅ WA restored: user ${uid}`);
-        } else if (connection === "close") {
-          waSessions[uid].isConnected = false;
-          const code = lastDisconnect?.error?.output?.statusCode;
-          if (code === DisconnectReason.loggedOut || code === 401) {
-            try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
-            delete waSessions[uid];
-          }
-        }
-      });
-      console.log(`🔄 Restoring WA session: user ${uid}`);
-    } catch(e) { console.error(`WA restore failed for ${uid}:`, e.message); }
-  }
-}
 
 /******************** YOUR CONFIGURATION ********************/
 const BOT_TOKEN = "8672122739:AAGXzye3H-78dPMswDLCzMLkkoimcDCqihY";
@@ -186,6 +54,111 @@ const TEMP_MAILS_FILE = path.join(DATA_DIR, "temp_mails.json");
 const EARNINGS_FILE = path.join(DATA_DIR, "earnings.json");
 const WITHDRAW_FILE = path.join(DATA_DIR, "withdrawals.json");
 const COUNTRY_PRICES_FILE = path.join(DATA_DIR, "country_prices.json");
+
+/******************** WHATSAPP SESSION SETUP ********************/
+const waSessions = {}; // { userId: { sock, isConnected } }
+const WA_SESSIONS_DIR = path.join(DATA_DIR, "wa_sessions");
+if (!fs.existsSync(WA_SESSIONS_DIR)) fs.mkdirSync(WA_SESSIONS_DIR, { recursive: true });
+
+async function createWASession(userId, phoneNumber) {
+  if (waSessions[userId]?.sock) {
+    try { waSessions[userId].sock.end(); } catch(e) {}
+    delete waSessions[userId];
+  }
+  const sessionDir = path.join(WA_SESSIONS_DIR, userId.toString());
+  if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
+    },
+    printQRInTerminal: false,
+    logger: pino({ level: "silent" }),
+    browser: ["Ubuntu", "Chrome", "20.0.04"],
+    syncFullHistory: false,
+  });
+
+  waSessions[userId] = { sock, isConnected: false };
+  sock.ev.on("creds.update", saveCreds);
+  sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
+    if (connection === "open") {
+      waSessions[userId].isConnected = true;
+      console.log(`✅ WA connected: user ${userId}`);
+    } else if (connection === "close") {
+      if (waSessions[userId]) waSessions[userId].isConnected = false;
+      const code = lastDisconnect?.error?.output?.statusCode;
+      if (code === DisconnectReason.loggedOut || code === 401) {
+        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
+        delete waSessions[userId];
+        console.log(`🔴 WA logged out: user ${userId}`);
+      }
+    }
+  });
+
+  await new Promise(r => setTimeout(r, 3000));
+  const code = await sock.requestPairingCode(phoneNumber.replace(/\D/g, ""));
+  return code;
+}
+
+function isWAConnected(userId) {
+  return waSessions[userId]?.isConnected === true;
+}
+
+async function checkWANumbers(userId, numbers) {
+  if (!isWAConnected(userId)) return {};
+  const sock = waSessions[userId].sock;
+  const results = {};
+  await Promise.all(numbers.map(async (num) => {
+    try {
+      const jid = num.replace(/\D/g, "") + "@s.whatsapp.net";
+      const [res] = await sock.onWhatsApp(jid);
+      results[num] = res?.exists === true;
+    } catch(e) { results[num] = null; }
+  }));
+  return results;
+}
+
+async function restoreWASessions() {
+  if (!fs.existsSync(WA_SESSIONS_DIR)) return;
+  const userFolders = fs.readdirSync(WA_SESSIONS_DIR);
+  for (const uid of userFolders) {
+    const sessionDir = path.join(WA_SESSIONS_DIR, uid);
+    if (!fs.existsSync(path.join(sessionDir, "creds.json"))) continue;
+    try {
+      const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+      const { version } = await fetchLatestBaileysVersion();
+      const sock = makeWASocket({
+        version,
+        auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })) },
+        printQRInTerminal: false,
+        logger: pino({ level: "silent" }),
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
+        syncFullHistory: false,
+      });
+      waSessions[uid] = { sock, isConnected: false };
+      sock.ev.on("creds.update", saveCreds);
+      sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
+        if (connection === "open") {
+          waSessions[uid].isConnected = true;
+          console.log(`✅ WA restored: user ${uid}`);
+        } else if (connection === "close") {
+          if (waSessions[uid]) waSessions[uid].isConnected = false;
+          const code = lastDisconnect?.error?.output?.statusCode;
+          if (code === DisconnectReason.loggedOut || code === 401) {
+            try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
+            delete waSessions[uid];
+          }
+        }
+      });
+      console.log(`🔄 Restoring WA session: user ${uid}`);
+    } catch(e) { console.error(`WA restore failed for ${uid}:`, e.message); }
+  }
+}
 
 /******************** DEFAULT SETTINGS ********************/
 let settings = {
@@ -943,7 +916,8 @@ bot.use(session({
     totpData: null,
     mailState: null,
     withdrawState: null,   // ← 'waiting_account' | 'confirm'
-    withdrawData: null     // ← { method, account, amount }
+    withdrawData: null,    // ← { method, account, amount }
+    waConnectState: null   // ← 'waiting_number'
   })
 }));
 
@@ -985,7 +959,8 @@ bot.use((ctx, next) => {
       totpData: null,
       mailState: null,
       withdrawState: null,
-      withdrawData: null
+      withdrawData: null,
+      waConnectState: null
     };
   }
 
@@ -1374,7 +1349,6 @@ bot.action(/^select_country:(.+):(.+)$/, async (ctx) => {
     const service  = services[serviceId];
     const otpPrice = getOtpPriceForCountry(countryCode);
 
-    // ── WA CHECK ──
     const waConnected = isWAConnected(userId);
     const waResults = await checkWANumbers(userId, numbers);
 
@@ -1386,7 +1360,6 @@ bot.action(/^select_country:(.+):(.+)$/, async (ctx) => {
       }
       numbersText += `${i + 1}. \`+${num}\`${waIcon}\n`;
     });
-    // ── END WA CHECK ──
 
     const message =
       `✅ *${numbers.length} Number(s) Assigned!*\n\n` +
@@ -1461,7 +1434,6 @@ bot.action(/^get_new_numbers:(.+):(.+)$/, async (ctx) => {
     const service  = services[serviceId];
     const otpPrice = getOtpPriceForCountry(countryCode);
 
-    // ── WA CHECK ──
     const waConnected = isWAConnected(userId);
     const waResults = await checkWANumbers(userId, numbers);
 
@@ -1473,7 +1445,6 @@ bot.action(/^get_new_numbers:(.+):(.+)$/, async (ctx) => {
       }
       numbersText += `${i + 1}. \`+${num}\`${waIcon}\n`;
     });
-    // ── END WA CHECK ──
 
     const message =
       `🔄 *${numbers.length} New Number(s)!*\n\n` +
@@ -1543,7 +1514,6 @@ bot.hears("🔄 Change Numbers", async (ctx) => {
   const service  = services[serviceId];
   const otpPrice = getOtpPriceForCountry(countryCode);
 
-  // ── WA CHECK ──
   const waConnected = isWAConnected(userId);
   const waResults = await checkWANumbers(userId, numbers);
 
@@ -1555,7 +1525,6 @@ bot.hears("🔄 Change Numbers", async (ctx) => {
     }
     numbersText += `${i + 1}. \`+${num}\`${waIcon}\n`;
   });
-  // ── END WA CHECK ──
 
   const message =
     `🔄 *${numbers.length} New Number(s)!*\n\n` +
@@ -2855,6 +2824,7 @@ bot.command("cancel", async (ctx) => {
   ctx.session.totpData = null;
   ctx.session.adminState = null;
   ctx.session.adminData = null;
+  ctx.session.waConnectState = null;
   await ctx.reply("✅ Cancelled.", {
     reply_markup: {
       keyboard: [
@@ -3828,6 +3798,50 @@ bot.action("admin_toggle_withdraw", async (ctx) => {
   );
 });
 
+/******************** WHATSAPP CONNECT HANDLERS ********************/
+bot.action("wa_connect", async (ctx) => {
+  await ctx.answerCbQuery();
+  ctx.session.waConnectState = "waiting_number";
+  await ctx.reply(
+    "📱 *WhatsApp Connect*\n\n" +
+    "তোমার WhatsApp নম্বর দাও *(country code সহ)*:\n" +
+    "Example: `8801712345678`\n\n" +
+    "⚠️ এই নম্বরের WA দিয়ে number check হবে।",
+    { parse_mode: "Markdown" }
+  );
+});
+
+bot.action("wa_status", async (ctx) => {
+  await ctx.answerCbQuery();
+  const userId = ctx.from.id.toString();
+  const connected = isWAConnected(userId);
+  await ctx.reply(
+    connected
+      ? "✅ *WhatsApp connected!*\n\nNumber assign হলে WA status দেখাবে।"
+      : "🔴 *WhatsApp connected নেই।*\n\nConnect করলে number check হবে।",
+    {
+      parse_mode: "Markdown",
+      reply_markup: {
+        inline_keyboard: connected
+          ? [[{ text: "🔴 Disconnect WA", callback_data: "wa_disconnect" }]]
+          : [[{ text: "📱 Connect WhatsApp", callback_data: "wa_connect" }]]
+      }
+    }
+  );
+});
+
+bot.action("wa_disconnect", async (ctx) => {
+  await ctx.answerCbQuery();
+  const userId = ctx.from.id.toString();
+  if (waSessions[userId]?.sock) {
+    try { waSessions[userId].sock.end(); } catch(e) {}
+    delete waSessions[userId];
+  }
+  const sessionDir = path.join(WA_SESSIONS_DIR, userId.toString());
+  try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
+  await ctx.reply("🔴 *WhatsApp disconnected.*", { parse_mode: "Markdown" });
+});
+
 /******************** ERROR HANDLER ********************/
 bot.catch((err, ctx) => {
   console.error(`❌ Bot error for ${ctx.updateType}:`, err);
@@ -3921,50 +3935,6 @@ bot.on("document", async (ctx) => {
   }
 });
 
-/******************** WHATSAPP CONNECT ACTIONS ********************/
-bot.action("wa_connect", async (ctx) => {
-  await ctx.answerCbQuery();
-  ctx.session.waConnectState = "waiting_number";
-  await ctx.reply(
-    "📱 *WhatsApp Connect*\n\n" +
-    "তোমার WhatsApp নম্বর দাও *(country code সহ)*:\n" +
-    "Example: `8801712345678`\n\n" +
-    "⚠️ এই নম্বরের WA দিয়ে number check হবে।",
-    { parse_mode: "Markdown" }
-  );
-});
-
-bot.action("wa_status", async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  const connected = isWAConnected(userId);
-  await ctx.reply(
-    connected
-      ? "✅ *WhatsApp connected!*\n\nNumber assign হলে WA ✅/❌ status দেখাবে।"
-      : "🔴 *WhatsApp connected নেই।*\n\nConnect করলে number check হবে।",
-    {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: connected
-          ? [[{ text: "🔴 Disconnect WA", callback_data: "wa_disconnect" }]]
-          : [[{ text: "📱 Connect WhatsApp", callback_data: "wa_connect" }]]
-      }
-    }
-  );
-});
-
-bot.action("wa_disconnect", async (ctx) => {
-  await ctx.answerCbQuery();
-  const userId = ctx.from.id.toString();
-  if (waSessions[userId]?.sock) {
-    try { waSessions[userId].sock.end(); } catch(e) {}
-    delete waSessions[userId];
-  }
-  const sessionDir = path.join(DATA_DIR, "wa_sessions", userId.toString());
-  try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
-  await ctx.reply("🔴 *WhatsApp disconnected.*", { parse_mode: "Markdown" });
-});
-
 /******************** TEXT INPUT HANDLER ********************/
 bot.on("text", async (ctx, next) => {
   try {
@@ -3979,13 +3949,13 @@ bot.on("text", async (ctx, next) => {
       if (phone.length < 10 || phone.length > 15) {
         return await ctx.reply("❌ Invalid number. Country code সহ দাও।\nExample: `8801712345678`", { parse_mode: "Markdown" });
       }
-      const loadMsg = await ctx.reply("⏳ *Connecting...*", { parse_mode: "Markdown" });
+      const loadMsg = await ctx.reply("⏳ *Connecting to WhatsApp...*", { parse_mode: "Markdown" });
       try {
         const rawCode = await createWASession(userId, phone);
         const code = rawCode.match(/.{1,4}/g)?.join("-") || rawCode;
         await ctx.telegram.deleteMessage(ctx.chat.id, loadMsg.message_id).catch(() => {});
         await ctx.reply(
-          `🔑 *Pairing Code*\n\n` +
+          `🔑 *WhatsApp Pairing Code*\n\n` +
           `\`${code}\`\n\n` +
           `📋 *Steps:*\n` +
           `1. WhatsApp খোলো\n` +
@@ -4010,7 +3980,6 @@ bot.on("text", async (ctx, next) => {
       }
       return;
     }
-    // ── END WA Connect ──
 
     const KEYBOARD_BUTTONS = [
       "☎️ Get Number", "📞 Get Numbers",
