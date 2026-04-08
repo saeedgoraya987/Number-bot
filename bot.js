@@ -22,12 +22,13 @@ async function createWASession(userId, phoneNumber) {
     try { waSessions[userId].sock.end(); } catch(e) {}
     delete waSessions[userId];
   }
+
   const WA_SESSIONS_DIR = path.join(DATA_DIR, "wa_sessions");
   if (!fs.existsSync(WA_SESSIONS_DIR)) fs.mkdirSync(WA_SESSIONS_DIR, { recursive: true });
   const sessionDir = path.join(WA_SESSIONS_DIR, userId.toString());
-  if (fs.existsSync(sessionDir)) {
-    try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
-  }
+
+  // পুরনো session সবসময় delete করো — না হলে pairing code কাজ করে না
+  try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
   fs.mkdirSync(sessionDir, { recursive: true });
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
@@ -41,9 +42,10 @@ async function createWASession(userId, phoneNumber) {
     },
     printQRInTerminal: false,
     logger: pino({ level: "silent" }),
-    browser: ["Ubuntu", "Chrome", "20.0.04"],  // ✅ FIX: correct browser format
+    browser: ["Chrome (Linux)", "", ""],
     syncFullHistory: false,
     mobile: false,
+    generateHighQualityLinkPreview: false,
   });
 
   waSessions[userId] = { sock, isConnected: false };
@@ -55,8 +57,8 @@ async function createWASession(userId, phoneNumber) {
       console.log(`✅ WA connected: user ${userId}`);
     } else if (connection === "close") {
       waSessions[userId].isConnected = false;
-      const code = lastDisconnect?.error?.output?.statusCode;
-      if (code === DisconnectReason.loggedOut || code === 401) {
+      const sc = lastDisconnect?.error?.output?.statusCode;
+      if (sc === DisconnectReason.loggedOut || sc === 401) {
         try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
         delete waSessions[userId];
         console.log(`🔴 WA logged out: user ${userId}`);
@@ -64,29 +66,33 @@ async function createWASession(userId, phoneNumber) {
     }
   });
 
-  // ✅ FIX: Wait for socket to properly connect to WA server before requesting pairing code
-  await new Promise((resolve) => {
-    let resolved = false;
-    sock.ev.on("connection.update", ({ connection }) => {
-      if (!resolved && (connection === "connecting" || connection === "open")) {
-        resolved = true;
-        resolve();
-      }
-    });
-    // Fallback: wait 8 seconds max
-    setTimeout(() => { if (!resolved) { resolved = true; resolve(); } }, 8000);
-  });
-
-  // Extra small delay after connection event
-  await new Promise(r => setTimeout(r, 1500));
-
   const cleanPhone = phoneNumber.replace(/\D/g, "");
   console.log(`📱 Requesting pairing code for: ${cleanPhone}`);
 
-  const pairingCode = await sock.requestPairingCode(cleanPhone);
-  console.log(`🔑 Pairing code received: ${pairingCode}`);
+  // creds.registered === false হলেই pairing code request করো
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("Timeout: WA server respond করেনি")), 60000);
 
-  return pairingCode;
+    const tryRequest = async () => {
+      try {
+        if (!sock.authState.creds.registered) {
+          const code = await sock.requestPairingCode(cleanPhone);
+          clearTimeout(timeout);
+          console.log(`🔑 Pairing code: ${code}`);
+          resolve(code);
+        } else {
+          clearTimeout(timeout);
+          reject(new Error("Already registered"));
+        }
+      } catch(e) {
+        clearTimeout(timeout);
+        console.error("Pairing code error:", e.message);
+        reject(e);
+      }
+    };
+
+    setTimeout(tryRequest, 2000);
+  });
 }
 
 function isWAConnected(userId) {
@@ -121,7 +127,7 @@ async function restoreWASessions() {
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })) },
         printQRInTerminal: false,
         logger: pino({ level: "silent" }),
-        browser: ["Ubuntu", "Chrome", "20.0.04"],  // ✅ FIX: consistent browser format
+        browser: ["Ubuntu", "Chrome", "20.0.04"],
         syncFullHistory: false,
       });
       waSessions[uid] = { sock, isConnected: false };
@@ -148,16 +154,19 @@ async function restoreWASessions() {
 const BOT_TOKEN = "8672122739:AAGXzye3H-78dPMswDLCzMLkkoimcDCqihY";
 const ADMIN_PASSWORD = "sadhin8miya61458";
 
+// ⚠️ IMPORTANT: Replace the IDs below with your actual IDs ⚠️
+// Use @getidsbot to find your IDs
 const MAIN_CHANNEL = "@earning_hub_official_channel";
-const MAIN_CHANNEL_ID = -1003543718769;
+const MAIN_CHANNEL_ID = -1003543718769; // numeric ID (not string)
 
 const CHAT_GROUP = "https://t.me/earning_hub_number_channel";
-const CHAT_GROUP_ID = -1003875142184;
+const CHAT_GROUP_ID = -1003875142184; // your group exact ID
 
 const OTP_GROUP = "https://t.me/EarningHub_otp";
-const OTP_GROUP_ID = -1003247504066;
+const OTP_GROUP_ID = -1003247504066; // your OTP group exact ID
 
 /******************** FILES ********************/
+// Railway Volume support - data persists across restarts
 const DATA_DIR = process.env.RAILWAY_VOLUME_MOUNT_PATH
   ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH)
   : __dirname;
@@ -183,8 +192,8 @@ let settings = {
   defaultNumberCount: 10,
   cooldownSeconds: 5,
   requireVerification: true,
-  minWithdraw: 50,
-  defaultOtpPrice: 0.25,
+  minWithdraw: 50,          // minimum withdraw amount (taka)
+  defaultOtpPrice: 0.25,    // default OTP price per country (taka)
   withdrawMethods: ["bKash", "Nagad"],
   withdrawEnabled: true
 };
@@ -337,30 +346,35 @@ if (fs.existsSync(ADMINS_FILE)) {
   }
 }
 
+// TOTP Secrets storage: { userId: [ { label, secret, service } ] }
 let totpSecrets = {};
 if (fs.existsSync(TOTP_SECRETS_FILE)) {
   try { totpSecrets = JSON.parse(fs.readFileSync(TOTP_SECRETS_FILE, 'utf8')); }
   catch (e) { totpSecrets = {}; }
 }
 
+// Temp Mails storage: { userId: { address, password, token } }
 let tempMails = {};
 if (fs.existsSync(TEMP_MAILS_FILE)) {
   try { tempMails = JSON.parse(fs.readFileSync(TEMP_MAILS_FILE, 'utf8')); }
   catch (e) { tempMails = {}; }
 }
 
+// Earnings storage: { userId: { balance, totalEarned, otpCount } }
 let earnings = {};
 if (fs.existsSync(EARNINGS_FILE)) {
   try { earnings = JSON.parse(fs.readFileSync(EARNINGS_FILE, 'utf8')); }
   catch (e) { earnings = {}; }
 }
 
+// Withdrawals: [ { userId, amount, method, account, status, requestedAt, processedAt } ]
 let withdrawals = [];
 if (fs.existsSync(WITHDRAW_FILE)) {
   try { withdrawals = JSON.parse(fs.readFileSync(WITHDRAW_FILE, 'utf8')); }
   catch (e) { withdrawals = []; }
 }
 
+// Country Prices: { countryCode: priceInTaka }
 let countryPrices = {};
 if (fs.existsSync(COUNTRY_PRICES_FILE)) {
   try { countryPrices = JSON.parse(fs.readFileSync(COUNTRY_PRICES_FILE, 'utf8')); }
@@ -597,6 +611,7 @@ function maskPhoneNumber(phone) {
 function extractPhoneNumberFromMessage(text) {
   if (!text) return null;
 
+  // 1. Full number (10-15 digit)
   const fullMatch = text.match(/\+?(\d{10,15})/);
   if (fullMatch) {
     const num = fullMatch[1];
@@ -606,19 +621,24 @@ function extractPhoneNumberFromMessage(text) {
   return null;
 }
 
+// Finds matching number from OTP message in activeNumbers
 function findMatchingActiveNumber(messageText) {
   const allActive = Object.keys(activeNumbers);
   if (allActive.length === 0) return null;
 
+  // Step 1: Full number direct match
   const extracted = extractPhoneNumberFromMessage(messageText);
   if (extracted) {
     if (activeNumbers[extracted]) return extracted;
+    // try without + sign
     const noPlus = extracted.replace(/^\+/, '');
     if (activeNumbers[noPlus]) return noPlus;
   }
 
+  // Step 2: check each active number against message
+  // Check larger matches first (8 → 6 → 4 digits)
   for (const num of allActive) {
-    if (messageText.includes(num)) return num;
+    if (messageText.includes(num)) return num;           // full number
   }
   for (const num of allActive) {
     const last8 = num.slice(-8);
@@ -636,13 +656,14 @@ function findMatchingActiveNumber(messageText) {
   return null;
 }
 
+// Extract OTP/verification code from message
 function extractOTPCode(text) {
   if (!text) return null;
   const patterns = [
     /(?:otp|code|pin|verification|verify|token)[^\d]{0,10}(\d{4,8})/i,
     /(?:is|has|:)\s*(\d{4,8})\b/i,
-    /\b(\d{6})\b/,
-    /\b(\d{4})\b/,
+    /\b(\d{6})\b/,  // Most common — 6 digit OTP
+    /\b(\d{4})\b/,  // 4 digit OTP
   ];
   for (const p of patterns) {
     const m = text.match(p);
@@ -680,6 +701,8 @@ function getTimeAgo(date) {
   } catch(e) { return "unknown"; }
 }
 
+/******************** HELPER FUNCTIONS ********************/
+
 function generateRandomString(length) {
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
   let result = "";
@@ -688,6 +711,8 @@ function generateRandomString(length) {
   }
   return result;
 }
+
+
 
 /******************** EMAIL SYSTEM - Mail.tm ********************/
 
@@ -744,6 +769,7 @@ function randomUsername() {
 
 async function createFreshEmail() {
   try {
+    // Step 1: Get available domain
     const domains = await mailTmRequest('GET', '/domains?page=1');
     const domainList = Array.isArray(domains) ? domains : (domains?.['hydra:member'] || []);
     console.log('Mail.tm domain list length:', domainList.length);
@@ -754,6 +780,7 @@ async function createFreshEmail() {
     }
     const domain = domainList[0].domain;
 
+    // Step 2: Create account (retry up to 3 times)
     const username = randomUsername();
     const password = randomPassword();
     const address = `${username}@${domain}`;
@@ -767,7 +794,7 @@ async function createFreshEmail() {
         console.log('Rate limited, waiting 3s...');
         await new Promise(r => setTimeout(r, 3000));
       } else {
-        break;
+        break; // non-rate-limit error, don't retry
       }
     }
 
@@ -776,6 +803,7 @@ async function createFreshEmail() {
       return null;
     }
 
+    // Step 3: Get JWT token
     const tokenRes = await mailTmRequest('POST', '/token', { address, password });
     console.log('Mail.tm token response:', JSON.stringify(tokenRes)?.substring(0, 100));
 
@@ -826,8 +854,11 @@ async function getEmailMessage(id, emailObj) {
   return '';
 }
 
+
+
 function generateTOTP(secret) {
   try {
+    // Clean secret - remove spaces
     const cleanSecret = secret.replace(/\s/g, "").toUpperCase();
     authenticator.options = { step: 30 };
     const token = authenticator.generate(cleanSecret);
@@ -911,8 +942,8 @@ bot.use(session({
     totpState: null,
     totpData: null,
     mailState: null,
-    withdrawState: null,
-    withdrawData: null
+    withdrawState: null,   // ← 'waiting_account' | 'confirm'
+    withdrawData: null     // ← { method, account, amount }
   })
 }));
 
@@ -936,6 +967,7 @@ bot.use((ctx, next) => {
     }
   }
 
+  // Session fallback (should rarely be needed since defaultSession() handles this)
   if (!ctx.session) {
     ctx.session = {
       verified: false,
@@ -976,16 +1008,20 @@ function clearUserState(ctx) {
 
 /******************** VERIFICATION MIDDLEWARE ********************/
 bot.use(async (ctx, next) => {
+  // শুধু private chat-এ verification চলবে
   if (ctx.chat?.type !== 'private') return next();
 
+  // Admin always passes
   if (ctx.session?.isAdmin) return next();
 
+  // /start and /adminlogin always pass
   if (ctx.message?.text?.startsWith('/start') || 
       ctx.message?.text?.startsWith('/adminlogin') ||
       ctx.message?.text?.startsWith('/cancel')) {
     return next();
   }
 
+  // Verification button always passes
   if (ctx.callbackQuery?.data === 'verify_user') return next();
 
   if (!ctx.from) return next();
@@ -994,15 +1030,17 @@ bot.use(async (ctx, next) => {
 
   const userId = ctx.from.id.toString();
   const now = Date.now();
-  const RECHECK_INTERVAL = 2 * 60 * 60 * 1000;
+  const RECHECK_INTERVAL = 2 * 60 * 60 * 1000; // 2 hours
 
   const lastCheck = ctx.session?.lastVerificationCheck || 0;
   const checkAge = now - lastCheck;
 
+  // Within 2 hours and already verified → skip re-check
   if (ctx.session?.verified && checkAge < RECHECK_INTERVAL) {
     return next();
   }
 
+  // 2 hours passed OR not verified → do live check
   const membership = await checkUserMembership(ctx);
 
   if (membership.allJoined) {
@@ -1012,8 +1050,9 @@ bot.use(async (ctx, next) => {
     return next();
   }
 
+  // Not a member → block
   ctx.session.verified = false;
-  ctx.session.lastVerificationCheck = 0;
+  ctx.session.lastVerificationCheck = 0; // reset so next request checks again
   if (users[userId]) { users[userId].verified = false; saveUsers(); }
   console.log(`🚫 Blocked user ${userId} — not in all required groups`);
 
@@ -1087,6 +1126,7 @@ async function showMainMenu(ctx) {
 /******************** START COMMAND ********************/
 bot.start(async (ctx) => {
   try {
+    // Previously verified users should stay verified (check users.json)
     const startUserId = ctx.from.id.toString();
     ctx.session.verified = users[startUserId]?.verified || false;
     ctx.session.currentNumbers = [];
@@ -1180,11 +1220,13 @@ bot.action("verify_user", async (ctx) => {
 /******************** GET NUMBERS ********************/
 bot.hears(["📞 Get Numbers", "☎️ Get Number"], async (ctx) => {
   clearUserState(ctx);
+  // Arrange service buttons 2 per row
   const availableServices = [];
   for (const serviceId in services) {
     const service = services[serviceId];
     const availableCountries = getAvailableCountriesForService(serviceId);
     if (availableCountries.length > 0) {
+      // total number count
       let totalNums = 0;
       for (const cc of availableCountries) {
         totalNums += (numbersByCountryService[cc]?.[serviceId]?.length || 0);
@@ -1202,6 +1244,7 @@ bot.hears(["📞 Get Numbers", "☎️ Get Number"], async (ctx) => {
     );
   }
 
+  // 2 per row
   const serviceButtons = [];
   for (let i = 0; i < availableServices.length; i += 2) {
     const row = [];
@@ -1242,10 +1285,12 @@ bot.action(/^select_service:(.+)$/, async (ctx) => {
 
     const service = services[serviceId];
 
+    // Sort by price (cheapest first)
     const sortedCountries = [...availableCountries].sort((a, b) =>
       getOtpPriceForCountry(a) - getOtpPriceForCountry(b)
     );
 
+    // Build 2 per row
     const countryButtons = [];
     for (let i = 0; i < sortedCountries.length; i += 2) {
       const row = [];
@@ -1329,6 +1374,7 @@ bot.action(/^select_country:(.+):(.+)$/, async (ctx) => {
     const service  = services[serviceId];
     const otpPrice = getOtpPriceForCountry(countryCode);
 
+    // ── WA CHECK ──
     const waConnected = isWAConnected(userId);
     const waResults = await checkWANumbers(userId, numbers);
 
@@ -1340,6 +1386,7 @@ bot.action(/^select_country:(.+):(.+)$/, async (ctx) => {
       }
       numbersText += `${i + 1}. \`+${num}\`${waIcon}\n`;
     });
+    // ── END WA CHECK ──
 
     const message =
       `✅ *${numbers.length} Number(s) Assigned!*\n\n` +
@@ -1414,6 +1461,7 @@ bot.action(/^get_new_numbers:(.+):(.+)$/, async (ctx) => {
     const service  = services[serviceId];
     const otpPrice = getOtpPriceForCountry(countryCode);
 
+    // ── WA CHECK ──
     const waConnected = isWAConnected(userId);
     const waResults = await checkWANumbers(userId, numbers);
 
@@ -1425,6 +1473,7 @@ bot.action(/^get_new_numbers:(.+):(.+)$/, async (ctx) => {
       }
       numbersText += `${i + 1}. \`+${num}\`${waIcon}\n`;
     });
+    // ── END WA CHECK ──
 
     const message =
       `🔄 *${numbers.length} New Number(s)!*\n\n` +
@@ -1494,6 +1543,7 @@ bot.hears("🔄 Change Numbers", async (ctx) => {
   const service  = services[serviceId];
   const otpPrice = getOtpPriceForCountry(countryCode);
 
+  // ── WA CHECK ──
   const waConnected = isWAConnected(userId);
   const waResults = await checkWANumbers(userId, numbers);
 
@@ -1505,6 +1555,7 @@ bot.hears("🔄 Change Numbers", async (ctx) => {
     }
     numbersText += `${i + 1}. \`+${num}\`${waIcon}\n`;
   });
+  // ── END WA CHECK ──
 
   const message =
     `🔄 *${numbers.length} New Number(s)!*\n\n` +
@@ -1700,9 +1751,11 @@ bot.action(/^withdraw_method:(.+)$/, async (ctx) => {
   const min = settings.minWithdraw;
   const fullBal = Math.floor(bal * 100) / 100;
 
+  // waiting_amount state - user can click button OR type manually
   ctx.session.withdrawState = "waiting_amount";
   ctx.session.withdrawData = { method };
 
+  // Amount quick-select buttons
   const amountButtons = [];
   const amounts = [];
   if (bal >= min) amounts.push(min);
@@ -1721,10 +1774,16 @@ bot.action(/^withdraw_method:(.+)$/, async (ctx) => {
   amountButtons.push([{ text: "❌ Cancel", callback_data: "withdraw_cancel" }]);
 
   await ctx.editMessageText(
-    `${icon} *${method} Withdrawal*\n\n` +
-    `💰 Your balance: *${e.balance.toFixed(2)} taka*\n` +
-    `📌 Minimum: *${settings.minWithdraw} taka*\n\n` +
-    `Select from the buttons below\nor type an amount in chat (e.g.: \`75\`):`,
+    `${icon} *${method} Withdrawal*
+
+` +
+    `💰 Your balance: *${e.balance.toFixed(2)} taka*
+` +
+    `📌 Minimum: *${settings.minWithdraw} taka*
+
+` +
+    `Select from the buttons below
+or type an amount in chat (e.g.: \`75\`):`,
     {
       parse_mode: "Markdown",
       reply_markup: { inline_keyboard: amountButtons }
@@ -1765,8 +1824,15 @@ bot.action(/^withdraw_amount:([^:]+):(.+)$/, async (ctx) => {
   ctx.session.withdrawData = { method, amount };
 
   await ctx.editMessageText(
-    `${icon} *${method} - ${amount.toFixed(2)} taka*\n\n` +
-    `📱 Your *${method} number:*\nExample: \`01712345678\`\n\nType /cancel to cancel`,
+    `${icon} *${method} - ${amount.toFixed(2)} taka*
+
+` +
+    `📱 Your *${method} number:*
+` +
+    `Example: \`01712345678\`
+
+` +
+    `Type /cancel to cancel`,
     {
       parse_mode: "Markdown",
       reply_markup: {
@@ -1864,6 +1930,8 @@ bot.hears("ℹ️ Help", async (ctx) => {
     { parse_mode: "Markdown" }
   );
 });
+
+
 
 /******************** ADMIN LOGIN ********************/
 bot.command("adminlogin", async (ctx) => {
@@ -2031,6 +2099,7 @@ bot.action("admin_users", async (ctx) => {
     const totalUsers = Object.keys(users).length;
     const activeUsers = Object.keys(activeNumbers).length;
 
+    // Markdown v1 — only * _ ` [ need escaping
     const esc = (str) => String(str || '').replace(/[_*`\[]/g, '\\$&');
 
     let message = "👥 *User Statistics*\n\n";
@@ -2074,6 +2143,7 @@ bot.action("admin_users", async (ctx) => {
     });
   } catch (error) {
     console.error("Admin users error:", error.message);
+    // Ignore "message not modified" - it's not a real error
     if (error.message?.includes('message is not modified')) return;
     try {
       await ctx.editMessageText(`❌ Error: ${error.message}`, {
@@ -2224,7 +2294,7 @@ bot.action(/^admin_select_service:(.+)$/, async (ctx) => {
     "*Format (one per line):*\n" +
     "1. Just number: `8801712345678`\n" +
     "2. With country: `8801712345678|880`\n" +
-    `3. With country and service: \`8801712345678|880|${serviceId}\`\n\n` +
+    "3. With country and service: `8801712345678|880|${serviceId}`\n\n" +
     "*Note:* Country code will be auto-detected if not provided.\n" +
     "*Supported:* .txt files only",
     {
@@ -2606,24 +2676,40 @@ bot.action("admin_settings", async (ctx) => {
 
 bot.action("admin_set_count", async (ctx) => {
   if (!ctx.session.isAdmin) return await ctx.answerCbQuery("❌ Admin only");
+
   ctx.session.adminState = "waiting_set_count";
+
   await ctx.editMessageText(
-    `📞 *Set Number Count*\n\nCurrent count: *${settings.defaultNumberCount}*\n\nSend the new number count (1-100):`,
+    `📞 *Set Number Count*\n\n` +
+    `Current count: *${settings.defaultNumberCount}*\n\n` +
+    `Send the new number count (1-100):`,
     {
       parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "admin_cancel" }]] }
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "❌ Cancel", callback_data: "admin_cancel" }]
+        ]
+      }
     }
   );
 });
 
 bot.action("admin_set_cooldown", async (ctx) => {
   if (!ctx.session.isAdmin) return await ctx.answerCbQuery("❌ Admin only");
+
   ctx.session.adminState = "waiting_set_cooldown";
+
   await ctx.editMessageText(
-    `⏱ *Set Cooldown*\n\nCurrent cooldown: *${settings.cooldownSeconds} seconds*\n\nSend the new cooldown in seconds (1-3600):`,
+    `⏱ *Set Cooldown*\n\n` +
+    `Current cooldown: *${settings.cooldownSeconds} seconds*\n\n` +
+    `Send the new cooldown in seconds (1-3600):`,
     {
       parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "admin_cancel" }]] }
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "❌ Cancel", callback_data: "admin_cancel" }]
+        ]
+      }
     }
   );
 });
@@ -2633,6 +2719,7 @@ bot.action("admin_toggle_verification", async (ctx) => {
   settings.requireVerification = !settings.requireVerification;
   saveSettings();
   await ctx.answerCbQuery(`✅ Verification ${settings.requireVerification ? "Enabled" : "Disabled"}`);
+  // Reuse admin_settings display
   await ctx.editMessageText(
     "⚙️ *Bot Settings*\n\n" +
     `📞 Number Count: *${settings.defaultNumberCount}*\n` +
@@ -2646,11 +2733,23 @@ bot.action("admin_toggle_verification", async (ctx) => {
       parse_mode: "Markdown",
       reply_markup: {
         inline_keyboard: [
-          [{ text: "📞 Number Count", callback_data: "admin_set_count" }, { text: "⏱ Cooldown", callback_data: "admin_set_cooldown" }],
-          [{ text: `🔐 Verification ${settings.requireVerification ? "Disable" : "Enable"}`, callback_data: "admin_toggle_verification" }],
-          [{ text: "💵 Set OTP Price", callback_data: "admin_set_default_price" }, { text: "💸 Set Min Withdraw", callback_data: "admin_set_min_withdraw" }],
-          [{ text: `🏧 Withdraw ${settings.withdrawEnabled ? "🔴 Disable" : "🟢 Enable"}`, callback_data: "admin_toggle_withdraw" }],
-          [{ text: "🔙 Back", callback_data: "admin_back" }]
+          [
+            { text: "📞 Number Count", callback_data: "admin_set_count" },
+            { text: "⏱ Cooldown", callback_data: "admin_set_cooldown" }
+          ],
+          [
+            { text: `🔐 Verification ${settings.requireVerification ? "Disable" : "Enable"}`, callback_data: "admin_toggle_verification" }
+          ],
+          [
+            { text: "💵 Set OTP Price", callback_data: "admin_set_default_price" },
+            { text: "💸 Set Min Withdraw", callback_data: "admin_set_min_withdraw" }
+          ],
+          [
+            { text: `🏧 Withdraw ${settings.withdrawEnabled ? "🔴 Disable" : "🟢 Enable"}`, callback_data: "admin_toggle_withdraw" }
+          ],
+          [
+            { text: "🔙 Back", callback_data: "admin_back" }
+          ]
         ]
       }
     }
@@ -2664,19 +2763,46 @@ bot.action("admin_back", async (ctx) => {
   ctx.session.adminData = null;
 
   const buttons = [
-    [{ text: "📊 Stock Report", callback_data: "admin_stock" }, { text: "👥 User Stats", callback_data: "admin_users" }],
-    [{ text: "📢 Broadcast", callback_data: "admin_broadcast" }, { text: "📋 OTP Log", callback_data: "admin_otp_log" }],
-    [{ text: "➕ Add Numbers", callback_data: "admin_add_numbers" }, { text: "📤 Upload File", callback_data: "admin_upload" }],
-    [{ text: "🗑️ Delete Numbers", callback_data: "admin_delete" }, { text: "🔧 Manage Services", callback_data: "admin_manage_services" }],
-    [{ text: "🌍 Manage Countries", callback_data: "admin_manage_countries" }, { text: "⚙️ Settings", callback_data: "admin_settings" }],
-    [{ text: "💰 Country Prices", callback_data: "admin_country_prices" }, { text: "💸 Withdrawals", callback_data: "admin_withdrawals" }],
-    [{ text: "👛 Balance Management", callback_data: "admin_balance_manage" }],
-    [{ text: "🚪 Logout", callback_data: "admin_logout" }]
+    [
+      { text: "📊 Stock Report", callback_data: "admin_stock" },
+      { text: "👥 User Stats", callback_data: "admin_users" }
+    ],
+    [
+      { text: "📢 Broadcast", callback_data: "admin_broadcast" },
+      { text: "📋 OTP Log", callback_data: "admin_otp_log" }
+    ],
+    [
+      { text: "➕ Add Numbers", callback_data: "admin_add_numbers" },
+      { text: "📤 Upload File", callback_data: "admin_upload" }
+    ],
+    [
+      { text: "🗑️ Delete Numbers", callback_data: "admin_delete" },
+      { text: "🔧 Manage Services", callback_data: "admin_manage_services" }
+    ],
+    [
+      { text: "🌍 Manage Countries", callback_data: "admin_manage_countries" },
+      { text: "⚙️ Settings", callback_data: "admin_settings" }
+    ],
+    [
+      { text: "💰 Country Prices", callback_data: "admin_country_prices" },
+      { text: "💸 Withdrawals", callback_data: "admin_withdrawals" }
+    ],
+    [
+      { text: "👛 Balance Management", callback_data: "admin_balance_manage" }
+    ]
   ];
 
+  buttons.push([
+    { text: "🚪 Logout", callback_data: "admin_logout" }
+  ]);
+
   await ctx.editMessageText(
-    "🛠 *Admin Dashboard*\n\nSelect an option:",
-    { parse_mode: "Markdown", reply_markup: { inline_keyboard: buttons } }
+    "🛠 *Admin Dashboard*\n\n" +
+    "Select an option:",
+    {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: buttons }
+    }
   );
 });
 
@@ -2687,10 +2813,15 @@ bot.action("admin_cancel", async (ctx) => {
   ctx.session.adminData = null;
 
   await ctx.editMessageText(
-    "❌ *Action Cancelled*\n\nReturning to admin panel...",
+    "❌ *Action Cancelled*\n\n" +
+    "Returning to admin panel...",
     {
       parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "🛠 Back to Admin", callback_data: "admin_back" }]] }
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🛠 Back to Admin", callback_data: "admin_back" }]
+        ]
+      }
     }
   );
 });
@@ -2703,10 +2834,15 @@ bot.action("admin_logout", async (ctx) => {
   ctx.session.adminData = null;
 
   await ctx.editMessageText(
-    "🚪 *Admin Logged Out*\n\nYou have been logged out from admin panel.",
+    "🚪 *Admin Logged Out*\n\n" +
+    "You have been logged out from admin panel.",
     {
       parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "🔙 Back to Main Menu", callback_data: "back_to_services" }]] }
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🔙 Back to Main Menu", callback_data: "back_to_services" }]
+        ]
+      }
     }
   );
 });
@@ -2731,7 +2867,7 @@ bot.command("cancel", async (ctx) => {
   });
 });
 
-/******************** TEMP MAIL ********************/
+/******************** TEXT HANDLER FOR ADMIN + TOTP + WITHDRAW ********************/
 bot.hears(["📧 Temp Mail", "📧 Get Tempmail"], async (ctx) => {
   clearUserState(ctx);
   const userId = ctx.from.id.toString();
@@ -2772,6 +2908,7 @@ bot.action("tempmail_create", async (ctx) => {
 
   await ctx.answerCbQuery("⏳ Creating email...");
 
+  // Send a new message instead of editing — avoids sentMsg undefined crash
   const loadingMsg = await ctx.reply("⏳ *Creating your email...*", { parse_mode: "Markdown" });
 
   setImmediate(async () => {
@@ -2791,6 +2928,7 @@ bot.action("tempmail_create", async (ctx) => {
 
       tempMails[userId] = newEmail;
       saveTempMails();
+      console.log(`📧 Email created for user ${userId}: ${newEmail.address}`);
 
       await ctx.telegram.editMessageText(
         ctx.chat.id, loadingMsg.message_id, null,
@@ -2825,6 +2963,7 @@ bot.action("tempmail_inbox", async (ctx) => {
     await ctx.answerCbQuery("📬 Loading inbox...");
     const userId = ctx.from.id.toString();
 
+    // No email found → ask to create
     if (!tempMails[userId]) {
       return await ctx.editMessageText(
         "❌ *No email found.*\n\nPress the button below to create a new email.",
@@ -2832,11 +2971,13 @@ bot.action("tempmail_inbox", async (ctx) => {
       );
     }
 
-    const { address, provider } = tempMails[userId];
+    const { address, provider, sidToken } = tempMails[userId];
 
+    // Fetch inbox via unified provider function
     let messages = [];
     try {
       messages = await getEmailInbox(tempMails[userId]);
+      console.log(`📬 Inbox (${provider}): ${address} → ${messages.length} messages`);
     } catch(e) {
       console.error('Inbox fetch error:', e.message);
     }
@@ -2898,6 +3039,7 @@ bot.action("tempmail_inbox", async (ctx) => {
   }
 });
 
+
 bot.action("tempmail_showaddress", async (ctx) => {
   await ctx.answerCbQuery();
   const userId = ctx.from.id.toString();
@@ -2948,10 +3090,13 @@ bot.action(/^totp_service:(.+)$/, async (ctx) => {
     `📌 *Where to find your key:*\n` +
     `• Facebook: Settings → Security → Two-Factor Authentication → Authenticator App → Setup Key\n` +
     `• Instagram: Settings → Security → Two-Factor → Authentication App → Manual key\n\n` +
-    `🔑 It looks like: \`JBSWY3DPEHPK3PXP\`\n\nType /cancel to cancel`,
+    `🔑 It looks like: \`JBSWY3DPEHPK3PXP\`\n\n` +
+    `Type /cancel to cancel`,
     {
       parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "totp_back" }]] }
+      reply_markup: {
+        inline_keyboard: [[{ text: "❌ Cancel", callback_data: "totp_back" }]]
+      }
     }
   );
 });
@@ -3000,6 +3145,7 @@ bot.action(/^totp_refresh:([^:]+):(.+)$/, async (ctx) => {
 
 bot.action("totp_list", async (ctx) => {
   await ctx.answerCbQuery();
+  // Back to main 2FA menu
   await ctx.editMessageText(
     "🔐 *2FA Code Generator*\n\nSelect a service:",
     {
@@ -3082,6 +3228,8 @@ bot.action("totp_back", async (ctx) => {
 });
 
 /******************** OTP GROUP MONITORING ********************/
+// ─── Real-time group leave detection ───
+// When a user leaves/is kicked from any of the required groups → immediately block them
 bot.on("chat_member", async (ctx) => {
   try {
     const member = ctx.chatMember;
@@ -3094,6 +3242,7 @@ bot.on("chat_member", async (ctx) => {
     const oldStatus = member.old_chat_member?.status;
     const newStatus = member.new_chat_member?.status;
 
+    // Check if this is one of our required groups/channels
     const isRequiredGroup = (
       chatId === MAIN_CHANNEL_ID?.toString() ||
       chatId === CHAT_GROUP_ID?.toString() ||
@@ -3102,10 +3251,12 @@ bot.on("chat_member", async (ctx) => {
 
     if (!isRequiredGroup) return;
 
+    // User was a member and now left/kicked/banned
     const wasActive = ["member", "administrator", "creator"].includes(oldStatus);
     const nowGone = ["left", "kicked", "restricted"].includes(newStatus);
 
     if (wasActive && nowGone) {
+      // Immediately revoke their verification
       if (users[userId]) {
         users[userId].verified = false;
         saveUsers();
@@ -3113,6 +3264,7 @@ bot.on("chat_member", async (ctx) => {
       console.log(`🚫 User ${userId} left/kicked from ${chatId} — access revoked immediately`);
     }
 
+    // User rejoined → reset so next request does a fresh check
     const wasGone = ["left", "kicked"].includes(oldStatus);
     const nowActive = ["member", "administrator", "creator"].includes(newStatus);
 
@@ -3127,11 +3279,13 @@ bot.on("chat_member", async (ctx) => {
 
 bot.on("message", async (ctx, next) => {
   try {
+    // Only process messages from OTP group
     const chatId = ctx.chat.id;
     const isOtpGroup =
       chatId === OTP_GROUP_ID ||
       chatId === Number(OTP_GROUP_ID) ||
       chatId.toString() === OTP_GROUP_ID.toString();
+    // IMPORTANT: call next() so bot.on("text") still fires for private chats
     if (!isOtpGroup) return next();
 
     const messageText = ctx.message.text || ctx.message.caption || '';
@@ -3140,6 +3294,7 @@ bot.on("message", async (ctx, next) => {
 
     console.log(`📨 OTP Group [${messageId}]: ${messageText.substring(0, 80)}`);
 
+    // 1. Which active number is this message for?
     const matchedNumber = findMatchingActiveNumber(messageText);
     if (!matchedNumber) {
       console.log('⚠️ No matching active number found');
@@ -3152,6 +3307,7 @@ bot.on("message", async (ctx, next) => {
     const userId   = userData.userId;
     const countryCode = userData.countryCode || '';
 
+    // Guard against duplicate message IDs (prevents double earning)
     if (userData.lastOTP === messageId) {
       console.log(`⚠️ Duplicate message ${messageId} ignored`);
       return;
@@ -3160,8 +3316,10 @@ bot.on("message", async (ctx, next) => {
     userData.otpCount = (userData.otpCount || 0) + 1;
     saveActiveNumbers();
 
+    // 2. Extract OTP code (if any)
     const otpCode = extractOTPCode(messageText);
 
+    // 3. Add earning and send notification to user
     const earned      = addEarning(userId, countryCode);
     const userBalance = getUserEarnings(userId).balance;
     const service     = services[userData.service] || { icon: '📱', name: userData.service };
@@ -3181,9 +3339,13 @@ bot.on("message", async (ctx, next) => {
       `\n💵 *+${earned.toFixed(2)} taka earned!*\n` +
       `💰 *Current Balance: ${userBalance.toFixed(2)} taka*`;
 
+    // Send notification to user
     await ctx.telegram.sendMessage(userId, notifyText, { parse_mode: 'Markdown' });
+
+    // 4. Forward original OTP group message for full context
     await ctx.telegram.forwardMessage(userId, OTP_GROUP_ID, messageId);
 
+    // 5. Save log
     otpLog.push({
       phoneNumber: matchedNumber,
       userId,
@@ -3220,6 +3382,7 @@ bot.action("withdraw_confirm", async (ctx) => {
     return await ctx.editMessageText("❌ Balance has changed. Please try again.", { parse_mode: "Markdown" });
   }
 
+  // Deduct balance
   userEarnings.balance = parseFloat((userEarnings.balance - amount).toFixed(2));
   saveEarnings();
 
@@ -3250,6 +3413,7 @@ bot.action("withdraw_confirm", async (ctx) => {
     { parse_mode: "Markdown" }
   );
 
+  // Notify all admins
   for (const adminId of admins) {
     try {
       await ctx.telegram.sendMessage(
@@ -3315,7 +3479,8 @@ bot.action(/^wadmin_approve:(.+)$/, async (ctx) => {
   saveWithdrawals();
 
   await ctx.editMessageText(
-    `✅ *Withdraw Approved!*\n\n👤 ${w.userName}\n💵 ${w.amount.toFixed(2)} taka → ${w.method}\n📱 ${w.account}`,
+    `✅ *Withdraw Approved!*\n\n` +
+    `👤 ${w.userName}\n💵 ${w.amount.toFixed(2)} taka → ${w.method}\n📱 ${w.account}`,
     { parse_mode: "Markdown" }
   );
 
@@ -3345,12 +3510,14 @@ bot.action(/^wadmin_reject:(.+)$/, async (ctx) => {
   w.processedAt = new Date().toISOString();
   saveWithdrawals();
 
+  // Refund balance
   const userEarnings = getUserEarnings(w.userId);
   userEarnings.balance = parseFloat((userEarnings.balance + w.amount).toFixed(2));
   saveEarnings();
 
   await ctx.editMessageText(
-    `❌ *Withdraw Rejected & Refunded!*\n\n👤 ${w.userName}\n💵 ${w.amount.toFixed(2)} taka refunded.`,
+    `❌ *Withdraw Rejected & Refunded!*\n\n` +
+    `👤 ${w.userName}\n💵 ${w.amount.toFixed(2)} taka refunded.`,
     { parse_mode: "Markdown" }
   );
 
@@ -3407,7 +3574,9 @@ bot.action("admin_set_country_price", async (ctx) => {
     "You can set multiple countries in one message (one per line):",
     {
       parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "admin_cancel" }]] }
+      reply_markup: {
+        inline_keyboard: [[{ text: "❌ Cancel", callback_data: "admin_cancel" }]]
+      }
     }
   );
 });
@@ -3428,6 +3597,7 @@ bot.action("admin_balance_manage", async (ctx) => {
   if (!ctx.session.isAdmin) return await ctx.answerCbQuery("❌ Admin only");
   await ctx.answerCbQuery();
 
+  // Top earners
   const topUsers = Object.entries(earnings)
     .sort(([,a],[,b]) => b.totalEarned - a.totalEarned)
     .slice(0, 10);
@@ -3466,7 +3636,10 @@ bot.action("admin_add_balance", async (ctx) => {
   await ctx.answerCbQuery();
   ctx.session.adminState = "waiting_add_balance";
   await ctx.editMessageText(
-    "➕ *Add User Balance*\n\nFormat: `[user_id] [amount]`\n\nExample: `123456789 50`",
+    "➕ *Add User Balance*\n\n" +
+    "Format: `[user_id] [amount]`\n\n" +
+    "Example: `123456789 50`\n\n" +
+    "Find User ID via /admin → User Stats:",
     { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "admin_cancel" }]] } }
   );
 });
@@ -3476,7 +3649,9 @@ bot.action("admin_deduct_balance", async (ctx) => {
   await ctx.answerCbQuery();
   ctx.session.adminState = "waiting_deduct_balance";
   await ctx.editMessageText(
-    "➖ *Deduct User Balance*\n\nFormat: `[user_id] [amount]`\n\nExample: `123456789 25`",
+    "➖ *Deduct User Balance*\n\n" +
+    "Format: `[user_id] [amount]`\n\n" +
+    "Example: `123456789 25`",
     { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "admin_cancel" }]] } }
   );
 });
@@ -3486,11 +3661,12 @@ bot.action("admin_reset_balance", async (ctx) => {
   await ctx.answerCbQuery();
   ctx.session.adminState = "waiting_reset_balance";
   await ctx.editMessageText(
-    "🔄 *Reset User Balance*\n\nSend the User ID (balance will be set to 0):\n\nExample: `123456789`",
+    "🔄 *Reset User Balance*\n\n" +
+    "Send the User ID (balance will be set to 0):\n\n" +
+    "Example: `123456789`",
     { parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: "❌ Cancel", callback_data: "admin_cancel" }]] } }
   );
 });
-
 bot.action("admin_withdrawals", async (ctx) => {
   if (!ctx.session.isAdmin) return await ctx.answerCbQuery("❌ Admin only");
   await ctx.answerCbQuery();
@@ -3629,11 +3805,23 @@ bot.action("admin_toggle_withdraw", async (ctx) => {
       parse_mode: "Markdown",
       reply_markup: {
         inline_keyboard: [
-          [{ text: "📞 Number Count", callback_data: "admin_set_count" }, { text: "⏱ Cooldown", callback_data: "admin_set_cooldown" }],
-          [{ text: `🔐 Verification ${settings.requireVerification ? "Disable" : "Enable"}`, callback_data: "admin_toggle_verification" }],
-          [{ text: "💵 Set OTP Price", callback_data: "admin_set_default_price" }, { text: "💸 Set Min Withdraw", callback_data: "admin_set_min_withdraw" }],
-          [{ text: `🏧 Withdraw ${settings.withdrawEnabled ? "🔴 Disable" : "🟢 Enable"}`, callback_data: "admin_toggle_withdraw" }],
-          [{ text: "🔙 Back", callback_data: "admin_back" }]
+          [
+            { text: "📞 Number Count", callback_data: "admin_set_count" },
+            { text: "⏱ Cooldown", callback_data: "admin_set_cooldown" }
+          ],
+          [
+            { text: `🔐 Verification ${settings.requireVerification ? "Disable" : "Enable"}`, callback_data: "admin_toggle_verification" }
+          ],
+          [
+            { text: "💵 Set OTP Price", callback_data: "admin_set_default_price" },
+            { text: "💸 Set Min Withdraw", callback_data: "admin_set_min_withdraw" }
+          ],
+          [
+            { text: `🏧 Withdraw ${settings.withdrawEnabled ? "🔴 Disable" : "🟢 Enable"}`, callback_data: "admin_toggle_withdraw" }
+          ],
+          [
+            { text: "🔙 Back", callback_data: "admin_back" }
+          ]
         ]
       }
     }
@@ -3644,6 +3832,7 @@ bot.action("admin_toggle_withdraw", async (ctx) => {
 bot.catch((err, ctx) => {
   console.error(`❌ Bot error for ${ctx.updateType}:`, err);
 });
+
 
 /******************** ADMIN FILE UPLOAD HANDLER ********************/
 bot.on("document", async (ctx) => {
@@ -3663,9 +3852,11 @@ bot.on("document", async (ctx) => {
 
     await ctx.reply("⏳ *Processing file...*", { parse_mode: "Markdown" });
 
+    // Download the file
     const fileLink = await ctx.telegram.getFileLink(doc.file_id);
     const fileUrl = fileLink.href || fileLink.toString();
 
+    // Fetch file content (Telegram files always use HTTPS)
     const fileContent = await new Promise((resolve, reject) => {
       https.get(fileUrl, (res) => {
         let data = "";
@@ -3819,6 +4010,7 @@ bot.on("text", async (ctx, next) => {
       }
       return;
     }
+    // ── END WA Connect ──
 
     const KEYBOARD_BUTTONS = [
       "☎️ Get Number", "📞 Get Numbers",
@@ -4160,6 +4352,7 @@ async function startBot() {
     console.log("🛠 Admin Login: /adminlogin [PASSWORD]");
     console.log("=====================================");
 
+    // ── 2-hour scheduled membership check for ALL users ──
     setInterval(async () => {
       if (!settings.requireVerification) return;
 
@@ -4197,6 +4390,7 @@ async function startBot() {
             blocked++;
             console.log(`🚫 [Scheduled] User ${userId} blocked — left a group`);
 
+            // Notify the user
             try {
               await bot.telegram.sendMessage(userId,
                 "⛔ *Access Blocked!*\n\nYou have left one or more required groups.\n\nJoin all groups and press VERIFY to continue.",
@@ -4205,18 +4399,19 @@ async function startBot() {
                   reply_markup: {
                     inline_keyboard: [
                       [{ text: "1️⃣ 📢 Main Channel", url: MAIN_CHANNEL }],
-                      [{ text: "2️⃣ 💬 Chat Group", url: CHAT_GROUP }],
+                      [{ text: "2️⃣ 💬 Chat Group", url: NUMBER_CHANNEL }],
                       [{ text: "3️⃣ 📨 OTP Group", url: OTP_GROUP }],
                       [{ text: "✅ VERIFY", callback_data: "verify_user" }]
                     ]
                   }
                 }
               );
-            } catch(e) {}
+            } catch(e) {} // user may have blocked the bot
           } else {
             users[userId].verified = true;
           }
 
+          // Small delay between each user to avoid Telegram rate limit
           await new Promise(r => setTimeout(r, 100));
 
         } catch(e) {
@@ -4227,7 +4422,7 @@ async function startBot() {
       saveUsers();
       console.log(`✅ [Scheduled Check] Done. ${blocked} user(s) blocked.`);
 
-    }, 2 * 60 * 60 * 1000);
+    }, 2 * 60 * 60 * 1000); // every 2 hours
 
   } catch (error) {
     console.error("❌ Failed to start bot:", error);
@@ -4239,4 +4434,4 @@ async function startBot() {
 startBot();
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'))
