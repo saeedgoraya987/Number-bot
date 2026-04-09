@@ -1,3 +1,6 @@
+/******************** CRYPTO FIX for Node.js 18 ********************/
+global.crypto = require("crypto");
+
 /******************** IMPORTS ********************/
 const { Telegraf, session } = require("telegraf");
 const fs = require("fs");
@@ -18,36 +21,21 @@ const pino = require("pino");
 const waSessions = {}; // { userId: { sock, isConnected } }
 
 async function createWASession(userId, phoneNumber) {
-  console.log(`\n====== WA SESSION START ======`);
-  console.log(`👤 User: ${userId}`);
-  console.log(`📱 Phone: ${phoneNumber}`);
-
   if (waSessions[userId]?.sock) {
-    console.log(`♻️ পুরনো session বন্ধ করা হচ্ছে...`);
-    try { waSessions[userId].sock.end(); } catch(e) { console.log(`⚠️ sock.end() error: ${e.message}`); }
+    try { waSessions[userId].sock.end(); } catch(e) {}
     delete waSessions[userId];
   }
-
   const WA_SESSIONS_DIR = path.join(DATA_DIR, "wa_sessions");
   if (!fs.existsSync(WA_SESSIONS_DIR)) fs.mkdirSync(WA_SESSIONS_DIR, { recursive: true });
   const sessionDir = path.join(WA_SESSIONS_DIR, userId.toString());
 
-  // পুরনো session delete
-  if (fs.existsSync(sessionDir)) {
-    console.log(`🗑️ পুরনো session folder delete হচ্ছে...`);
-    try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) { console.log(`⚠️ rmSync error: ${e.message}`); }
-  }
+  // পুরনো session সবসময় delete করো
+  try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
   fs.mkdirSync(sessionDir, { recursive: true });
-  console.log(`📁 Session folder তৈরি: ${sessionDir}`);
 
-  console.log(`🔄 Baileys auth state load হচ্ছে...`);
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-
-  console.log(`🔄 Latest Baileys version fetch হচ্ছে...`);
   const { version } = await fetchLatestBaileysVersion();
-  console.log(`✅ Baileys version: ${version.join(".")}`);
 
-  console.log(`🔄 WA Socket তৈরি হচ্ছে...`);
   const sock = makeWASocket({
     version,
     auth: {
@@ -60,48 +48,32 @@ async function createWASession(userId, phoneNumber) {
     syncFullHistory: false,
     mobile: false,
   });
-  console.log(`✅ WA Socket তৈরি হয়েছে`);
-  console.log(`🔑 creds.registered = ${sock.authState.creds.registered}`);
 
   waSessions[userId] = { sock, isConnected: false };
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
-    console.log(`🔔 connection.update → connection=${connection}`);
     if (connection === "open") {
       waSessions[userId].isConnected = true;
       console.log(`✅ WA connected: user ${userId}`);
     } else if (connection === "close") {
       waSessions[userId].isConnected = false;
       const sc = lastDisconnect?.error?.output?.statusCode;
-      console.log(`🔴 WA close: statusCode=${sc}`);
       if (sc === DisconnectReason.loggedOut || sc === 401) {
         try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
         delete waSessions[userId];
-        console.log(`🗑️ WA session deleted: user ${userId}`);
+        console.log(`🔴 WA logged out: user ${userId}`);
       }
     }
   });
 
   const cleanPhone = phoneNumber.replace(/\D/g, "");
-  console.log(`📞 Clean phone number: ${cleanPhone}`);
-  console.log(`⏳ 3 সেকেন্ড অপেক্ষা করা হচ্ছে socket ready হওয়ার জন্য...`);
+  console.log(`📱 Requesting pairing code for: ${cleanPhone}`);
   await new Promise(r => setTimeout(r, 3000));
 
-  console.log(`🔑 requestPairingCode() call হচ্ছে...`);
-  try {
-    const code = await sock.requestPairingCode(cleanPhone);
-    console.log(`✅ Pairing code পাওয়া গেছে: ${code}`);
-    console.log(`====== WA SESSION END ======\n`);
-    return code;
-  } catch(e) {
-    console.log(`❌ requestPairingCode() FAILED!`);
-    console.log(`❌ Error name: ${e.name}`);
-    console.log(`❌ Error message: ${e.message}`);
-    console.log(`❌ Error stack: ${e.stack}`);
-    console.log(`====== WA SESSION END ======\n`);
-    throw e;
-  }
+  const code = await sock.requestPairingCode(cleanPhone);
+  console.log(`✅ Pairing code: ${code}`);
+  return code;
 }
 
 function isWAConnected(userId) {
