@@ -40,7 +40,8 @@ async function createWASession(userId, phoneNumber) {
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
   const { version } = await fetchLatestBaileysVersion();
 
-  const cleanPhone = phoneNumber.replace(/\D/g, "");
+  // + সহ phone number — এটাই WA server accept করে
+  const cleanPhone = "+" + phoneNumber.replace(/\D/g, "");
   console.log(`📱 Pairing code request for: ${cleanPhone}`);
 
   const sock = makeWASocket({
@@ -70,12 +71,12 @@ async function createWASession(userId, phoneNumber) {
       if (sc === DisconnectReason.loggedOut || sc === 401) {
         try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch(e) {}
         delete waSessions[userId];
+        console.log(`🗑️ WA session deleted: user ${userId}`);
       }
     }
   });
 
-  // QR event মানে socket WA server এর সাথে connected এবং auth এর জন্য ready
-  // এই মুহূর্তেই requestPairingCode করলে WA server টা accept করে
+  // QR event এ pairing code request করো
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("Timeout — WA server respond করেনি")), 60000);
 
