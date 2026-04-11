@@ -32,12 +32,13 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8672122739:AAGXzye3H-78dPMswDLCzMLkkoimcDCqihY"
 ADMIN_PASSWORD = "sadhin8miya61458"
 
-MAIN_CHANNEL    = "@earning_hub_official_channel"
-MAIN_CHANNEL_ID = -1003543718769
-CHAT_GROUP      = "https://t.me/earning_hub_number_channel"
-CHAT_GROUP_ID   = -1003875142184
-OTP_GROUP       = "https://t.me/EarningHub_otp"
-OTP_GROUP_ID    = -1003247504066
+MAIN_CHANNEL     = "@earning_hub_official_channel"
+MAIN_CHANNEL_URL = "https://t.me/earning_hub_official_channel"
+MAIN_CHANNEL_ID  = -1003543718769
+CHAT_GROUP       = "https://t.me/earning_hub_number_channel"
+CHAT_GROUP_ID    = -1003875142184
+OTP_GROUP        = "https://t.me/EarningHub_otp"
+OTP_GROUP_ID     = -1003247504066
 
 # ─── Data Directory ───
 DATA_DIR = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", os.path.dirname(os.path.abspath(__file__)))
@@ -511,7 +512,7 @@ def main_keyboard():
 
 def verify_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("1️⃣ 📢 Main Channel", url=MAIN_CHANNEL)],
+        [InlineKeyboardButton("1️⃣ 📢 Main Channel", url=MAIN_CHANNEL_URL)],
         [InlineKeyboardButton("2️⃣ 💬 Number Channel", url=CHAT_GROUP)],
         [InlineKeyboardButton("3️⃣ 📨 OTP Group", url=OTP_GROUP)],
         [InlineKeyboardButton("✅ VERIFY MEMBERSHIP", callback_data="verify_user")],
@@ -593,28 +594,35 @@ async def ensure_verified(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # ─── /start ───
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    uid  = str(user.id)
+    try:
+        user = update.effective_user
+        uid  = str(user.id)
 
-    if uid not in users:
-        users[uid] = {
-            "id": uid, "username": user.username or "no_username",
-            "first_name": user.first_name or "User",
-            "last_name": user.last_name or "",
-            "joined": datetime.now().isoformat(),
-            "last_active": datetime.now().isoformat(),
-            "verified": False,
-        }
-        save_users()
+        if uid not in users:
+            users[uid] = {
+                "id": uid, "username": user.username or "no_username",
+                "first_name": user.first_name or "User",
+                "last_name": user.last_name or "",
+                "joined": datetime.now().isoformat(),
+                "last_active": datetime.now().isoformat(),
+                "verified": False,
+            }
+            save_users()
 
-    await update.message.reply_text(
-        f"👋 *Welcome to Earning Hub Number Bot!*\n\n"
-        f"📱 Get virtual numbers for OTP verification\n"
-        f"💵 Earn money from each OTP received\n\n"
-        f"First, join all required groups to use the bot:",
-        parse_mode="Markdown",
-        reply_markup=verify_keyboard()
-    )
+        await update.message.reply_text(
+            f"👋 *Welcome to Earning Hub Number Bot!*\n\n"
+            f"📱 Get virtual numbers for OTP verification\n"
+            f"💵 Earn money from each OTP received\n\n"
+            f"First, join all required groups to use the bot:",
+            parse_mode="Markdown",
+            reply_markup=verify_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"cmd_start error: {e}")
+        try:
+            await update.message.reply_text("⚠️ Error occurred. Please try again.")
+        except:
+            pass
 
 # ─── Verify ───
 async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
