@@ -364,16 +364,29 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         ]:
             try:
                 el = page.locator(sel).first
-                await el.wait_for(state="visible", timeout=30000)
+                await el.wait_for(state="attached", timeout=30000)
+                # scroll into view and force click — viewport এর বাইরে থাকলেও কাজ করবে
+                await el.scroll_into_view_if_needed()
+                await asyncio.sleep(0.5)
+                await el.click(force=True)
                 phone_btn = el
-                logger.info(f"✅ Button: {sel}")
+                logger.info(f"✅ Button clicked: {sel}")
                 break
             except: continue
 
         if not phone_btn:
-            raise Exception("'Link with phone number' button পাওয়া যায়নি")
+            # JavaScript দিয়ে শেষ চেষ্টা
+            try:
+                await page.evaluate("""
+                    const btns = Array.from(document.querySelectorAll('button, div[role=button]'));
+                    const btn = btns.find(b => b.innerText && b.innerText.includes('phone number'));
+                    if (btn) btn.click();
+                """)
+                logger.info("✅ Button clicked via JS")
+                await asyncio.sleep(1)
+            except:
+                raise Exception("'Link with phone number' button পাওয়া যায়নি")
 
-        await phone_btn.click()
         await asyncio.sleep(2)
 
         # Phone input
