@@ -675,7 +675,7 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
 
 
 async def check_wa_number(phone: str, user_id: str):
-    """Check if number has WhatsApp — improved version with better timeout & selectors"""
+    """Check if number has WhatsApp — JS-based fast detection with popup cleanup"""
     uid = str(user_id)
     sess = wa_sessions.get(uid, {})
     if not sess.get("connected") or not sess.get("page"):
@@ -685,68 +685,95 @@ async def check_wa_number(phone: str, user_id: str):
     digits = re.sub(r"\D", "", phone)
 
     try:
-        # Navigate to number check URL
+        # ── Step 1: আগের যেকোনো popup/dialog বন্ধ করো ──
+        try:
+            await page.evaluate("""() => {
+                // Close button খুঁজে click করো
+                const closeBtns = Array.from(document.querySelectorAll(
+                    "[data-testid='popup-controls'] button, " +
+                    "[data-testid='alert-dialog'] button, " +
+                    "div[role='dialog'] button"
+                ));
+                for (const btn of closeBtns) {
+                    const txt = (btn.innerText || '').toLowerCase();
+                    if (txt.includes('ok') || txt.includes('close') || txt.includes('cancel')) {
+                        btn.click();
+                        break;
+                    }
+                }
+                // Escape key ও চাপো
+                document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
+            }""")
+            await asyncio.sleep(0.5)
+        except:
+            pass
+
+        # ── Step 2: Number check URL এ navigate করো ──
         await page.goto(
             f"https://web.whatsapp.com/send?phone={digits}",
             wait_until="domcontentloaded",
             timeout=20000
         )
 
-        # Initial wait — WhatsApp Web needs time to process
-        await asyncio.sleep(3)
-
-        # Check loop — max 10 seconds (50 × 0.2s)
-        for _ in range(50):
+        # ── Step 3: JS দিয়ে DOM check — max 12 seconds ──
+        for attempt in range(60):  # 60 × 0.2s = 12s
             await asyncio.sleep(0.2)
 
-            # ── Invalid number check ──
-            # Only use specific popup-contents testid (NOT div[role='dialog'] — too broad)
-            try:
-                invalid_el = page.locator("[data-testid='popup-contents']").first
-                if await invalid_el.is_visible(timeout=200):
-                    text = ""
-                    try:
-                        text = (await invalid_el.inner_text(timeout=300)).lower()
-                    except:
-                        pass
-                    # Confirm it's actually the "invalid number" popup
-                    if any(kw in text for kw in ["invalid", "phone", "number", "not", "নম্বর", "ফোন"]):
-                        return False
-                    # Unknown popup — keep checking
-            except:
-                pass
+            result = await page.evaluate("""() => {
+                // ── 1. Invalid number popup check ──
+                const popupEl = document.querySelector("[data-testid='popup-contents']");
+                if (popupEl && popupEl.offsetParent !== null) {
+                    const txt = (popupEl.innerText || '').toLowerCase();
+                    if (txt.length > 0) return 'invalid';
+                }
 
-            # ── Also check alert-dialog separately ──
-            try:
-                alert_el = page.locator("[data-testid='alert-dialog']").first
-                if await alert_el.is_visible(timeout=200):
-                    return False
-            except:
-                pass
+                // ── 2. Alert dialog check ──
+                const alertEl = document.querySelector("[data-testid='alert-dialog']");
+                if (alertEl && alertEl.offsetParent !== null) {
+                    return 'invalid';
+                }
 
-            # ── Valid number check — compose box visible ──
-            try:
-                compose = page.locator(
-                    "div[data-testid='conversation-compose-box-input']"
-                ).first
-                if await compose.is_visible(timeout=200):
-                    return True
-            except:
-                pass
+                // ── 3. Compose box = valid number ──
+                const compose = document.querySelector(
+                    "[data-testid='conversation-compose-box-input']"
+                );
+                if (compose && compose.offsetParent !== null) return 'valid';
 
-            # ── Fallback: contenteditable compose box ──
-            try:
-                compose2 = page.locator(
+                // ── 4. Contenteditable fallback ──
+                const editable = document.querySelector(
                     "div[contenteditable='true'][data-tab]"
-                ).first
-                if await compose2.is_visible(timeout=200):
-                    return True
-            except:
-                pass
+                );
+                if (editable && editable.offsetParent !== null) return 'valid';
 
-        return None  # timeout — could not determine
+                // ── 5. Still loading? ──
+                return 'loading';
+            }""")
 
-    except:
+            if result == "valid":
+                logger.info(f"✅ WA check: +{digits} → HAS WhatsApp")
+                return True
+            elif result == "invalid":
+                logger.info(f"❌ WA check: +{digits} → NO WhatsApp (fresh)")
+                # Popup dismiss করো পরের check এর জন্য
+                try:
+                    await page.evaluate("""() => {
+                        const btns = Array.from(document.querySelectorAll(
+                            "[data-testid='popup-controls'] button, " +
+                            "[data-testid='alert-dialog'] button"
+                        ));
+                        if (btns.length > 0) btns[0].click();
+                    }""")
+                    await asyncio.sleep(0.3)
+                except:
+                    pass
+                return False
+            # else: still loading — continue loop
+
+        logger.warning(f"⬜ WA check: +{digits} → timeout")
+        return None  # timeout
+
+    except Exception as e:
+        logger.warning(f"WA check error for +{digits}: {e}")
         return None
 
 
@@ -1136,7 +1163,7 @@ async def build_numbers_message(svc_id, cc, nums, wa_status_map=None):
     for i, n in enumerate(nums):
         if wa_status_map is not None:
             st = wa_status_map.get(n)
-            icon = " 📱" if st is True else (" ✅" if st is False else " ⬜")
+            icon = " 📱" if st is True else (" ✅" if st is False else "")
         else:
             icon = ""
         lines.append(f"{i+1}. `+{n}`{icon}")
