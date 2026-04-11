@@ -421,11 +421,22 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
             }""")
 
             # 4 char alphanumeric chunks খোঁজো
+            # phone number digits বাদ দিতে হবে
+            phone_digits = digits  # যেমন 8801304006503
+
             chunks = []
             for t in all_texts:
                 clean = re.sub(r'[^A-Z0-9]', '', t.upper().strip())
-                if len(clean) == 4:
-                    chunks.append(clean)
+                # 4 char হতে হবে
+                if len(clean) != 4:
+                    continue
+                # phone number এর substring হলে বাদ দাও
+                if clean in phone_digits:
+                    continue
+                # purely digit হলে বাদ দাও (real code এ letter থাকে)
+                if clean.isdigit():
+                    continue
+                chunks.append(clean)
 
             logger.info(f"📦 chunks: {chunks[:8]}")
 
@@ -441,12 +452,17 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
                     logger.info(f"🎉 Code from chunks: {code}")
                     break
 
-            # Method 2: body text pattern
+            # Method 2: body text — letter+digit mixed pattern (real pairing code)
             body_text = await page.evaluate("() => document.body.innerText")
-            m = re.search(r'([A-Z0-9]{4})[-\s]([A-Z0-9]{4})', body_text)
-            if m:
-                code = f"{m.group(1)}-{m.group(2)}"
-                logger.info(f"🎉 Code from body: {code}")
+            # Real code এ letter থাকে — purely numeric হবে না
+            for m in re.finditer(r'([A-Z0-9]{4})[-\s]([A-Z0-9]{4})', body_text):
+                p1, p2 = m.group(1), m.group(2)
+                # phone number এর অংশ না হলেই নাও
+                if p1 not in phone_digits and p2 not in phone_digits:
+                    code = f"{p1}-{p2}"
+                    logger.info(f"🎉 Code from body: {code}")
+                    break
+            if code:
                 break
 
         if not code:
