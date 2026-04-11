@@ -393,7 +393,7 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
             except:
                 pass
 
-        await asyncio.sleep(4)
+        await asyncio.sleep(5)
 
         # Step 2: Country code + phone number input
         country_prefix = ""
@@ -406,38 +406,83 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
 
         logger.info(f"📱 Country: +{country_prefix}, Local: {local_number}")
 
-        # Phone input — multiple selectors try করো
+        # সব inputs collect করো — visible inputs log করো
+        all_inputs_info = await page.evaluate("""() => {
+            const inputs = Array.from(document.querySelectorAll('input'));
+            return inputs.map((inp, i) => ({
+                index: i,
+                type: inp.type,
+                value: inp.value,
+                placeholder: inp.placeholder,
+                inputmode: inp.getAttribute('inputmode'),
+                testid: inp.getAttribute('data-testid'),
+                visible: inp.offsetParent !== null
+            }));
+        }""")
+        logger.info(f"📋 All inputs: {all_inputs_info}")
+
+        visible_inputs = [inp for inp in all_inputs_info if inp.get('visible')]
+        logger.info(f"👁️ Visible inputs: {visible_inputs}")
+
         typed = False
-        input_selectors = [
-            "[data-testid='link-device-phone-num-input']",
-            "input[type='text']",
-            "input[inputmode='numeric']",
-            "input[type='tel']",
-            "input",
-        ]
-        for sel in input_selectors:
+
+        if len(visible_inputs) >= 2:
+            # দুটো input — [0]=country code, [1]=phone number
             try:
-                inp_el = page.locator(sel).first
-                await inp_el.wait_for(state="visible", timeout=4000)
-                await inp_el.click()
-                await asyncio.sleep(0.3)
-                await inp_el.press("Control+a")
-                await inp_el.press("Delete")
-                await asyncio.sleep(0.3)
-                await inp_el.type(local_number, delay=100)
-                logger.info(f"✅ Typed local number via sel: {sel}")
+                first_inp = page.locator('input').nth(visible_inputs[0]['index'])
+                await first_inp.click()
+                await first_inp.press("Control+a")
+                await first_inp.press("Delete")
+                await asyncio.sleep(0.4)
+                if country_prefix:
+                    await first_inp.type(country_prefix, delay=80)
+                    logger.info(f"✅ Country prefix typed: {country_prefix}")
+                await asyncio.sleep(0.5)
+            except Exception as ce:
+                logger.warning(f"Country input error: {ce}")
+
+            try:
+                second_inp = page.locator('input').nth(visible_inputs[1]['index'])
+                await second_inp.click()
+                await second_inp.press("Control+a")
+                await second_inp.press("Delete")
+                await asyncio.sleep(0.4)
+                await second_inp.type(local_number, delay=100)
+                logger.info(f"✅ Local number typed: {local_number}")
                 typed = True
-                break
-            except:
-                pass
+            except Exception as ne:
+                logger.warning(f"Number input error: {ne}")
 
         if not typed:
-            # Fallback: keyboard type
-            await page.keyboard.press("Control+a")
-            await page.keyboard.type(local_number, delay=80)
-            logger.info("✅ Typed via keyboard fallback")
+            # Single input — full digits দিয়ে try
+            for sel in [
+                "[data-testid='link-device-phone-num-input']",
+                "input[inputmode='numeric']",
+                "input[type='tel']",
+                "input[type='text']",
+                "input",
+            ]:
+                try:
+                    inp_el = page.locator(sel).first
+                    await inp_el.wait_for(state="visible", timeout=3000)
+                    await inp_el.triple_click()
+                    await asyncio.sleep(0.3)
+                    await inp_el.press("Control+a")
+                    await inp_el.press("Delete")
+                    await asyncio.sleep(0.3)
+                    await inp_el.type(digits, delay=100)
+                    logger.info(f"✅ Full digits typed via sel: {sel}")
+                    typed = True
+                    break
+                except:
+                    pass
 
-        await asyncio.sleep(3)
+        if not typed:
+            await page.keyboard.press("Control+a")
+            await page.keyboard.type(digits, delay=80)
+            logger.info("✅ Typed via keyboard fallback (full digits)")
+
+        await asyncio.sleep(4)
 
         # Step 3: Next button click — সব উপায়ে
         next_clicked = None
