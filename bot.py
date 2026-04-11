@@ -402,52 +402,52 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         logger.info("✅ Next clicked")
         await asyncio.sleep(4)
 
-        # Step 4: Pairing code extract — multiple methods
+        # Step 4: Pairing code extract
         code = None
 
-        # Method 1: page body থেকে code pattern খোঁজো
-        for attempt in range(10):
-            body_text = await page.evaluate("() => document.body.innerText")
-            logger.info(f"🔍 Body scan attempt {attempt+1}")
+        for attempt in range(15):
+            await asyncio.sleep(2)
+            logger.info(f"🔍 Code scan attempt {attempt+1}")
 
-            # XXXX-XXXX pattern
-            m = re.search(r'([A-Z0-9]{4})[\s\-]([A-Z0-9]{4})', body_text)
+            # Method 1: JS দিয়ে সব ছোট text element collect করো
+            # WhatsApp Web এ code আলাদা আলাদা span এ থাকে
+            all_texts = await page.evaluate("""() => {
+                const texts = [];
+                document.querySelectorAll('span, div, p').forEach(el => {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    if (t.length >= 1 && t.length <= 6) texts.push(t);
+                });
+                return texts;
+            }""")
+
+            # 4 char alphanumeric chunks খোঁজো
+            chunks = []
+            for t in all_texts:
+                clean = re.sub(r'[^A-Z0-9]', '', t.upper().strip())
+                if len(clean) == 4:
+                    chunks.append(clean)
+
+            logger.info(f"📦 chunks: {chunks[:8]}")
+
+            if len(chunks) >= 2:
+                seen = []
+                for c in chunks:
+                    if c not in seen:
+                        seen.append(c)
+                    if len(seen) == 2:
+                        break
+                if len(seen) == 2:
+                    code = f"{seen[0]}-{seen[1]}"
+                    logger.info(f"🎉 Code from chunks: {code}")
+                    break
+
+            # Method 2: body text pattern
+            body_text = await page.evaluate("() => document.body.innerText")
+            m = re.search(r'([A-Z0-9]{4})[-\s]([A-Z0-9]{4})', body_text)
             if m:
                 code = f"{m.group(1)}-{m.group(2)}"
-                logger.info(f"🎉 Code found (pattern1): {code}")
+                logger.info(f"🎉 Code from body: {code}")
                 break
-
-            # 8 char alphanumeric
-            m = re.search(r'\b([A-Z0-9]{8})\b', body_text)
-            if m:
-                raw = m.group(1)
-                code = f"{raw[:4]}-{raw[4:]}"
-                logger.info(f"🎉 Code found (pattern2): {code}")
-                break
-
-            await asyncio.sleep(2)
-
-        # Method 2: specific selectors
-        if not code:
-            for sel in [
-                "[data-testid='device-link-passkey']",
-                "[data-testid='pairing-code']",
-                "div[data-testid*='passkey']",
-                "div[data-testid*='pairing']",
-                "span[data-testid*='passkey']",
-                "div[class*='passkey']",
-                "div[class*='pairing']",
-            ]:
-                try:
-                    el = page.locator(sel).first
-                    await el.wait_for(state="visible", timeout=3000)
-                    raw = (await el.inner_text()).strip()
-                    clean = re.sub(r"[^A-Z0-9]", "", raw.upper())
-                    if len(clean) >= 8:
-                        code = f"{clean[:4]}-{clean[4:8]}"
-                        logger.info(f"🎉 Code from selector {sel}: {code}")
-                        break
-                except: continue
 
         if not code:
             raise Exception("Pairing code পাওয়া যায়নি — WhatsApp Web layout পরিবর্তন হয়েছে")
