@@ -315,7 +315,12 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
     wa_sessions[uid] = {"browser": None, "page": None, "connected": False, "pw": None}
 
     import shutil
-    chromium_path = shutil.which("chromium") or shutil.which("chromium-browser") or None
+    chromium_path = (
+        os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH") or
+        shutil.which("chromium") or
+        shutil.which("chromium-browser") or
+        "/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None
+    )
 
     pw_instance = await async_playwright().start()
     launch_opts = dict(
@@ -2040,39 +2045,38 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sess["state"] = None
         phone = re.sub(r"\D", "", text)
         if len(phone) < 10 or len(phone) > 15:
-            return await update.message.reply_text("❌ Invalid number. Example: `8801712345678`", parse_mode="Markdown")
+            return await update.message.reply_text("❌ Invalid number. Example: 8801712345678")
 
         loading = await update.message.reply_text(
-            "⏳ *WhatsApp Web এ connect হচ্ছে...\n\n⌛ এটা ৩০-৬০ সেকেন্ড সময় নিতে পারে। অপেক্ষা করুন।",
-            parse_mode="Markdown"
+            "⏳ WhatsApp Web এ connect হচ্ছে...\n\n"
+            "⌛ এটা ৩০-৬০ সেকেন্ড সময় নিতে পারে। অপেক্ষা করুন।"
         )
         try:
             code = await get_wa_pairing_code(phone, uid)
-            # Normalize: remove dashes then reformat as XXXX-XXXX
             clean_code = re.sub(r"[^A-Z0-9]", "", code.upper())
-            if len(clean_code) >= 8:
-                formatted = clean_code[:4] + "-" + clean_code[4:8]
-            else:
-                formatted = code
+            formatted = (clean_code[:4] + "-" + clean_code[4:8]) if len(clean_code) >= 8 else code
             await loading.delete()
             await update.message.reply_text(
-                f"🔑 *Pairing Code*\n\n`{formatted}`\n\n"
-                f"📋 *Steps:*\n"
+                f"🔑 Pairing Code\n\n"
+                f"{formatted}\n\n"
+                f"Steps:\n"
                 f"1. WhatsApp খোলো\n"
                 f"2. Settings → Linked Devices\n"
-                f"3. Link a Device → *Link with phone number*\n"
+                f"3. Link a Device → Link with phone number\n"
                 f"4. উপরের code enter করো\n\n"
                 f"⏰ ১ মিনিটের মধ্যে expire হবে।",
-                parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ Check Status", callback_data="wa_status")],
                     [InlineKeyboardButton("🔄 New Code", callback_data="wa_connect")],
                 ])
             )
         except Exception as e:
-            await loading.delete()
-            logger.error(f"WA connect error: {e}")
-            await update.message.reply_text(f"❌ Connection failed: {str(e)[:100]}\n\nকিছুক্ষণ পর try করো।")
+            try: await loading.delete()
+            except: pass
+            logger.error(f"WA error: {e}", exc_info=True)
+            await update.message.reply_text(
+                f"❌ Error: {str(e)[:200]}\n\nকিছুক্ষণ পর আবার try করো।"
+            )
         return
 
     # ── TOTP secret input ──
