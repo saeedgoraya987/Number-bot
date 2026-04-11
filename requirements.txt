@@ -1,0 +1,3 @@
+python-telegram-bot==21.3
+pyotp==2.9.0
+playwright==1.44.0
