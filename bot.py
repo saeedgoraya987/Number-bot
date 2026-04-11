@@ -406,145 +406,140 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
 
         logger.info(f"📱 Country: +{country_prefix}, Local: {local_number}")
 
-        # সব inputs collect করো — visible inputs log করো
-        all_inputs_info = await page.evaluate("""() => {
-            const inputs = Array.from(document.querySelectorAll('input'));
-            return inputs.map((inp, i) => ({
-                index: i,
-                type: inp.type,
-                value: inp.value,
-                placeholder: inp.placeholder,
-                inputmode: inp.getAttribute('inputmode'),
-                testid: inp.getAttribute('data-testid'),
-                visible: inp.offsetParent !== null
-            }));
+        # ── React-compatible input method ──
+        # WhatsApp Web React এর জন্য nativeInputValueSetter + dispatchEvent দরকার
+        react_set_result = await page.evaluate(f"""() => {{
+            // React controlled input value set করার সঠিক পদ্ধতি
+            function setReactValue(el, value) {{
+                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value'
+                ).set;
+                nativeInputValueSetter.call(el, value);
+                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                el.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true }}));
+            }}
+
+            const allInputs = Array.from(document.querySelectorAll('input'));
+            const visibleInputs = allInputs.filter(el => el.offsetParent !== null);
+            
+            console.log('Visible inputs count:', visibleInputs.length);
+            
+            if (visibleInputs.length === 0) {{
+                return {{ success: false, msg: 'No visible inputs found', count: allInputs.length }};
+            }}
+            
+            if (visibleInputs.length >= 2) {{
+                // দুটো field: country code + local number
+                setReactValue(visibleInputs[0], '{country_prefix}');
+                setReactValue(visibleInputs[1], '{local_number}');
+                visibleInputs[1].focus();
+                return {{ success: true, msg: 'two-field', cc: '{country_prefix}', num: '{local_number}' }};
+            }} else {{
+                // একটাই field — full digits
+                setReactValue(visibleInputs[0], '{digits}');
+                visibleInputs[0].focus();
+                return {{ success: true, msg: 'single-field', full: '{digits}' }};
+            }}
+        }}""")
+        logger.info(f"⌨️ React input result: {react_set_result}")
+
+        await asyncio.sleep(3)
+
+        # React state update নিশ্চিত করতে আরেকবার trigger
+        await page.evaluate("""() => {
+            const visibleInputs = Array.from(document.querySelectorAll('input')).filter(el => el.offsetParent !== null);
+            visibleInputs.forEach(el => {
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            });
         }""")
-        logger.info(f"📋 All inputs: {all_inputs_info}")
 
-        visible_inputs = [inp for inp in all_inputs_info if inp.get('visible')]
-        logger.info(f"👁️ Visible inputs: {visible_inputs}")
+        await asyncio.sleep(2)
 
-        typed = False
-
-        if len(visible_inputs) >= 2:
-            # দুটো input — [0]=country code, [1]=phone number
-            try:
-                first_inp = page.locator('input').nth(visible_inputs[0]['index'])
-                await first_inp.click()
-                await first_inp.press("Control+a")
-                await first_inp.press("Delete")
-                await asyncio.sleep(0.4)
-                if country_prefix:
-                    await first_inp.type(country_prefix, delay=80)
-                    logger.info(f"✅ Country prefix typed: {country_prefix}")
-                await asyncio.sleep(0.5)
-            except Exception as ce:
-                logger.warning(f"Country input error: {ce}")
-
-            try:
-                second_inp = page.locator('input').nth(visible_inputs[1]['index'])
-                await second_inp.click()
-                await second_inp.press("Control+a")
-                await second_inp.press("Delete")
-                await asyncio.sleep(0.4)
-                await second_inp.type(local_number, delay=100)
-                logger.info(f"✅ Local number typed: {local_number}")
-                typed = True
-            except Exception as ne:
-                logger.warning(f"Number input error: {ne}")
-
-        if not typed:
-            # Single input — full digits দিয়ে try
-            for sel in [
-                "[data-testid='link-device-phone-num-input']",
-                "input[inputmode='numeric']",
-                "input[type='tel']",
-                "input[type='text']",
-                "input",
-            ]:
-                try:
-                    inp_el = page.locator(sel).first
-                    await inp_el.wait_for(state="visible", timeout=3000)
-                    await inp_el.triple_click()
-                    await asyncio.sleep(0.3)
-                    await inp_el.press("Control+a")
-                    await inp_el.press("Delete")
-                    await asyncio.sleep(0.3)
-                    await inp_el.type(digits, delay=100)
-                    logger.info(f"✅ Full digits typed via sel: {sel}")
-                    typed = True
-                    break
-                except:
-                    pass
-
-        if not typed:
-            await page.keyboard.press("Control+a")
-            await page.keyboard.type(digits, delay=80)
-            logger.info("✅ Typed via keyboard fallback (full digits)")
-
-        await asyncio.sleep(4)
-
-        # Step 3: Next button click — সব উপায়ে
+        # Step 3: Next button — React state check করে click
         next_clicked = None
 
-        # Method 1: data-testid wait loop
-        for attempt in range(6):
+        # Method 1: data-testid দিয়ে enabled হওয়ার wait করো (8 attempt)
+        for attempt in range(8):
             try:
                 next_btn = page.locator("[data-testid='link-device-phone-num-next-btn']").first
                 await next_btn.wait_for(state="visible", timeout=3000)
                 is_disabled = await next_btn.is_disabled()
-                logger.info(f"🔘 Next btn disabled={is_disabled}, attempt={attempt+1}")
+                aria_disabled = await next_btn.get_attribute("aria-disabled")
+                logger.info(f"🔘 Next disabled={is_disabled} aria={aria_disabled} attempt={attempt+1}")
+                if not is_disabled and aria_disabled != "true":
+                    await next_btn.click()
+                    next_clicked = "testid-enabled"
+                    logger.info("✅ Next clicked (enabled)")
+                    break
+                # Button এখনো disabled — React state আবার trigger করো
+                await page.evaluate("""() => {
+                    const visibleInputs = Array.from(document.querySelectorAll('input')).filter(el => el.offsetParent !== null);
+                    visibleInputs.forEach(el => {
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true }));
+                        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
+                    });
+                }""")
+                await asyncio.sleep(2)
+            except:
+                await asyncio.sleep(1.5)
+
+        # Method 2: Enter key (React form submit trigger)
+        if not next_clicked:
+            # Last focused input এ Enter চাপো
+            await page.keyboard.press("Enter")
+            next_clicked = "enter"
+            logger.info("✅ Next via Enter")
+            await asyncio.sleep(3)
+
+            # Enter এর পরেও check করো
+            try:
+                next_btn = page.locator("[data-testid='link-device-phone-num-next-btn']").first
+                is_disabled = await next_btn.is_disabled()
                 if not is_disabled:
                     await next_btn.click()
-                    next_clicked = "testid"
-                    logger.info("✅ Next clicked via testid")
-                    break
-                await asyncio.sleep(1.5)
+                    next_clicked = "enter-then-click"
+                    logger.info("✅ Next clicked after Enter")
             except:
-                await asyncio.sleep(1)
+                pass
 
-        # Method 2: JS force click (disabled attribute সরিয়ে)
-        if not next_clicked:
+        # Method 3: JS click (last resort — disabled হলেও)
+        if not next_clicked or next_clicked == "enter":
             result = await page.evaluate("""() => {
-                // Specific testid
                 let btn = document.querySelector("[data-testid='link-device-phone-num-next-btn']");
                 if (btn) {
+                    const isDisabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true';
+                    if (!isDisabled) {
+                        btn.click();
+                        return 'js-enabled-click';
+                    }
+                    // Disabled হলেও try — last resort
                     btn.removeAttribute('disabled');
                     btn.removeAttribute('aria-disabled');
                     btn.click();
-                    return 'testid-force';
+                    return 'js-force';
                 }
-                // Submit button
+                // যেকোনো submit/next button
                 const btns = Array.from(document.querySelectorAll('button'));
                 for (const b of btns) {
-                    const testid = b.getAttribute('data-testid') || '';
-                    const txt = (b.innerText || '').toLowerCase();
-                    if (testid.includes('next') || b.type === 'submit' || txt === 'next') {
+                    const tid = b.getAttribute('data-testid') || '';
+                    if (tid.includes('next') || b.type === 'submit') {
                         b.removeAttribute('disabled');
                         b.click();
-                        return 'submit-force';
+                        return 'fallback-submit';
                     }
                 }
-                // Arrow/chevron SVG button
-                for (const b of btns) {
-                    if (b.querySelector('svg')) {
-                        b.click();
-                        return 'svg-btn';
-                    }
-                }
-                return null;
+                return 'not-found';
             }""")
-            next_clicked = result
-            logger.info(f"✅ Next via JS: {result}")
-
-        # Method 3: Enter key
-        if not next_clicked:
-            await page.keyboard.press("Enter")
-            next_clicked = "enter"
-            logger.info("✅ Next via Enter key")
+            if next_clicked != "enter":
+                next_clicked = result
+            logger.info(f"✅ JS click result: {result}")
 
         logger.info(f"📌 Final next method: {next_clicked}")
-        await asyncio.sleep(7)  # Code generate হওয়ার জন্য বেশি সময় দাও
+        await asyncio.sleep(8)  # Code generate হওয়ার জন্য পর্যাপ্ত সময়
 
         # ─── Step 4: Pairing Code Extraction — IMPROVED ───
         code = None
