@@ -300,9 +300,9 @@ def generate_totp(secret: str):
 
 # ─── WhatsApp Pairing via Playwright ───
 async def get_wa_pairing_code(phone: str) -> str:
-    """Open WhatsApp Web and get pairing code"""
-    clean = "+" + re.sub(r"\D", "", phone)
-    logger.info(f"📱 WA Pairing code request for: {clean}")
+    """Get WhatsApp pairing code via phone number linking on WhatsApp Web"""
+    digits = re.sub(r"\D", "", phone)
+    logger.info(f"📱 WA pairing code for: +{digits}")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -314,65 +314,99 @@ async def get_wa_pairing_code(phone: str) -> str:
                 "--disable-gpu",
             ]
         )
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+        page = await browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            )
         )
-        page = await context.new_page()
 
         try:
-            await page.goto("https://web.whatsapp.com", timeout=60000)
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            await asyncio.sleep(3)
+            # ── Step 1: Load WhatsApp Web ──
+            logger.info("🌐 Loading WhatsApp Web...")
+            await page.goto("https://web.whatsapp.com/", timeout=60000)
 
-            # Click "Link with phone number"
-            link_btn = await page.query_selector("text=Link with phone number")
-            if not link_btn:
-                link_btn = await page.query_selector("[data-testid='link-device-phone-num-button']")
-            if link_btn:
-                await link_btn.click()
-                await asyncio.sleep(2)
+            # Wait for the "Link with phone number" button — WhatsApp Web loads this on the QR page
+            logger.info("⏳ Waiting for link-with-phone button...")
+            await page.wait_for_selector(
+                "[data-testid='link-device-phone-num-button'], "
+                "button:has-text('Link with phone number'), "
+                "div[role='button']:has-text('phone')",
+                timeout=40000,
+                state="visible"
+            )
+
+            # ── Step 2: Click "Link with phone number" ──
+            for sel in [
+                "[data-testid='link-device-phone-num-button']",
+                "button:has-text('Link with phone number')",
+                "div[role='button']:has-text('Link with phone number')",
+            ]:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible():
+                        await el.click()
+                        logger.info(f"✅ Clicked phone button")
+                        break
+                except:
+                    continue
+
+            # ── Step 3: Wait for phone input and fill ──
+            logger.info(f"📞 Entering: +{digits}")
+            await page.wait_for_selector(
+                "input[type='tel'], input[data-testid='phone-number-input']",
+                timeout=15000,
+                state="visible"
+            )
+            phone_input = page.locator("input[type='tel'], input[data-testid='phone-number-input']").first
+            await phone_input.click()
+            await phone_input.fill(digits)
+
+            # ── Step 4: Click Next ──
+            for sel in [
+                "[data-testid='link-device-phone-num-next-btn']",
+                "button:has-text('Next')",
+                "div[role='button']:has-text('Next')",
+            ]:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible():
+                        await el.click()
+                        logger.info("✅ Clicked Next")
+                        break
+                except:
+                    continue
             else:
-                # Try alternate approach
-                await page.click("text=Link a device", timeout=10000)
-                await asyncio.sleep(2)
-                link_phone = await page.query_selector("text=Link with phone number")
-                if link_phone:
-                    await link_phone.click()
-                    await asyncio.sleep(2)
+                await phone_input.press("Enter")
 
-            # Type phone number
-            phone_input = await page.query_selector("input[type='tel'], input[placeholder*='phone'], input[aria-label*='phone']")
-            if phone_input:
-                await phone_input.fill(clean)
-                await asyncio.sleep(1)
-                await page.keyboard.press("Enter")
-                await asyncio.sleep(3)
+            # ── Step 5: Wait for pairing code ──
+            logger.info("🔍 Waiting for pairing code...")
+            await page.wait_for_selector(
+                "[data-testid='device-link-passkey'], "
+                "[data-testid='pairing-code'], "
+                "div[data-testid*='passkey']",
+                timeout=30000,
+                state="visible"
+            )
 
-            # Get the code from the page
-            code = None
-            for _ in range(15):
-                await asyncio.sleep(2)
-                # Look for 8-character code on page
-                code_el = await page.query_selector("[data-testid='device-link-passkey']")
-                if code_el:
-                    code = await code_el.inner_text()
-                    break
-                # Try finding by text pattern
-                content = await page.content()
-                m = re.search(r"\b([A-Z0-9]{4})-([A-Z0-9]{4})\b", content)
-                if m:
-                    code = m.group(0)
-                    break
+            code_el = page.locator(
+                "[data-testid='device-link-passkey'], "
+                "[data-testid='pairing-code'], "
+                "div[data-testid*='passkey']"
+            ).first
+            raw = (await code_el.inner_text()).strip()
+            code = re.sub(r"[^A-Z0-9]", "", raw.upper())
 
-            if code:
-                logger.info(f"✅ Pairing code: {code}")
-                return code.strip()
-            else:
-                raise Exception("Pairing code not found on WhatsApp Web")
+            if len(code) < 8:
+                raise Exception(f"Invalid code received: '{raw}'")
+
+            result = code[:4] + "-" + code[4:8]
+            logger.info(f"🎉 Pairing code: {result}")
+            return result
 
         finally:
             await browser.close()
-
 async def check_wa_number(phone: str, user_id: str) -> bool:
     """Check if a number is on WhatsApp"""
     uid = str(user_id)
@@ -609,14 +643,27 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             save_users()
 
-        await update.message.reply_text(
+        sess = get_session(uid)
+        sess["state"] = None
+        sess["data"]  = None
+
+        welcome = (
             f"👋 *Welcome to Earning Hub Number Bot!*\n\n"
             f"📱 Get virtual numbers for OTP verification\n"
-            f"💵 Earn money from each OTP received\n\n"
-            f"First, join all required groups to use the bot:",
-            parse_mode="Markdown",
-            reply_markup=verify_keyboard()
+            f"💵 Earn money from each OTP received"
         )
+
+        # If already verified, show main keyboard directly
+        if sess.get("verified") or (uid in users and users[uid].get("verified")):
+            await update.message.reply_text(
+                welcome + "\n\n✅ Choose an option:", 
+                parse_mode="Markdown", reply_markup=main_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                welcome + "\n\nFirst, join all required groups to use the bot:",
+                parse_mode="Markdown", reply_markup=verify_keyboard()
+            )
     except Exception as e:
         logger.error(f"cmd_start error: {e}")
         try:
@@ -637,6 +684,9 @@ async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sess = get_session(uid)
         sess["verified"] = True
         sess["last_verification_check"] = time.time()
+        # Restore admin status if applicable
+        if is_admin(uid):
+            sess["is_admin"] = True
         if uid in users:
             users[uid]["verified"] = True
             save_users()
@@ -664,6 +714,8 @@ async def cmd_adminlogin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)
         sess = get_session(uid)
         sess["is_admin"] = True
+        sess["state"]    = None
+        sess["data"]     = None
         if uid not in admins:
             admins.append(uid)
             save_admins()
@@ -677,6 +729,9 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess = get_session(uid)
     if not sess["is_admin"] and not is_admin(uid):
         return await update.message.reply_text("❌ Use /adminlogin [password] first.")
+    # Reset any leftover state
+    sess["state"] = None
+    sess["data"]  = None
     await update.message.reply_text("🛠 *Admin Dashboard*\n\nSelect an option:", parse_mode="Markdown", reply_markup=admin_keyboard())
 
 # ─── GET NUMBERS ───
@@ -1893,6 +1948,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_users()
 
     sess = get_session(uid)
+    # Restore admin status from file if session was cleared (e.g. after restart)
+    if not sess.get("is_admin") and is_admin(uid):
+        sess["is_admin"] = True
     state = sess.get("state")
 
     # ── WhatsApp number input ──
@@ -1902,10 +1960,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(phone) < 10 or len(phone) > 15:
             return await update.message.reply_text("❌ Invalid number. Example: `8801712345678`", parse_mode="Markdown")
 
-        loading = await update.message.reply_text("⏳ *Connecting WhatsApp...*", parse_mode="Markdown")
+        loading = await update.message.reply_text(
+            "⏳ *WhatsApp Web এ connect হচ্ছে...\n\n⌛ এটা ৩০-৬০ সেকেন্ড সময় নিতে পারে। অপেক্ষা করুন।",
+            parse_mode="Markdown"
+        )
         try:
             code = await get_wa_pairing_code(phone)
-            formatted = "-".join([code[i:i+4] for i in range(0, len(code), 4)])
+            # Normalize: remove dashes then reformat as XXXX-XXXX
+            clean_code = re.sub(r"[^A-Z0-9]", "", code.upper())
+            if len(clean_code) >= 8:
+                formatted = clean_code[:4] + "-" + clean_code[4:8]
+            else:
+                formatted = code
             await loading.delete()
             await update.message.reply_text(
                 f"🔑 *Pairing Code*\n\n`{formatted}`\n\n"
@@ -2290,6 +2356,8 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess = get_session(uid)
     sess["state"] = None
     sess["data"]  = None
+    if is_admin(uid):
+        sess["is_admin"] = True
     await update.message.reply_text("✅ Cancelled.", reply_markup=main_keyboard())
 
 # ─── Periodic scheduled check ───
@@ -2408,8 +2476,9 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_admin_cancel, pattern="^admin_cancel$"))
     app.add_handler(CallbackQueryHandler(cb_admin_logout, pattern="^admin_logout$"))
 
-    # OTP group + text handler
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_otp_group_message))
+    # OTP group handler — only matches messages from the OTP group chat
+    app.add_handler(MessageHandler(filters.Chat(OTP_GROUP_ID) & ~filters.COMMAND, handle_otp_group_message))
+    # Private text handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
 
     # Start scheduled task
