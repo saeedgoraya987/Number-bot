@@ -1146,10 +1146,38 @@ async def cb_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = str(update.effective_user.id)
     sess = get_session(uid)
     sess["state"] = "wa_waiting_number"
-    await context.bot.send_message(
-        update.effective_user.id,
-        "📱 *WhatsApp Connect*\n\nতোমার WhatsApp নম্বর দাও *(country code সহ)*:\nExample: `8801712345678`",
-        parse_mode="Markdown"
+    await query.edit_message_text(
+        "📱 *WhatsApp Connect*\n\n"
+        "তোমার WhatsApp নম্বর দাও *(country code সহ)*:\n"
+        "Example: `8801712345678`\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "🔄 *আগে থেকে connected আছো?*\n"
+        "Railway restart হলে session মুছে যায়।\n"
+        "নিচের button চেপে reconnect করো:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ আমি Already Connected", callback_data="wa_already_connected")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="goto_main")],
+        ])
+    )
+
+async def cb_wa_already_connected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User confirms WhatsApp is already linked — just restore session in bot memory"""
+    query = update.callback_query
+    await query.answer("✅ Reconnected!")
+    uid  = str(update.effective_user.id)
+    sess = get_session(uid)
+    sess["state"] = "wa_already_connected_number"
+    await query.edit_message_text(
+        "📱 *Already Connected Confirm*\n\n"
+        "তোমার WhatsApp নম্বরটা দাও (country code সহ):\n"
+        "Example: `8801712345678`\n\n"
+        "_(এটা শুধু bot এর memory তে save হবে — "
+        "নতুন pairing code লাগবে না)_",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Cancel", callback_data="goto_main")]
+        ])
     )
 
 async def cb_wa_confirm_connected(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2116,6 +2144,32 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+    # ── WhatsApp already connected — just save number ──
+    if state == "wa_already_connected_number":
+        sess["state"] = None
+        phone = re.sub(r"\D", "", text)
+        if len(phone) < 10 or len(phone) > 15:
+            return await update.message.reply_text(
+                "❌ Invalid number. Example: `8801712345678`",
+                parse_mode="Markdown"
+            )
+        wa_sessions[uid] = {"connected": True, "pending": False, "phone": phone}
+        country = countries.get(
+            get_country_code_from_number(phone),
+            {"flag": "🌍", "name": "Unknown"}
+        )
+        await update.message.reply_text(
+            f"✅ *WhatsApp Reconnected!*\n\n"
+            f"📞 Number: `+{phone}`\n"
+            f"{country['flag']} Country: {country['name']}\n\n"
+            f"Bot এ WhatsApp session restore হয়েছে।",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")],
+            ])
+        )
+        return
+
     # ── WhatsApp number input ──
     if state == "wa_waiting_number":
         sess["state"] = None
@@ -2135,10 +2189,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 formatted = clean_code[:4] + "-" + clean_code[4:8]
             else:
                 formatted = code
-            # ── Code পেলেই session এ pending হিসেবে সেট করো ──
+            # ── Code পেলেই connected=True সেট করো ──
             wa_sessions[uid] = {
-                "connected": False,
-                "pending":   True,
+                "connected": True,
+                "pending":   False,
                 "phone":     phone,
             }
             await loading.delete()
@@ -2151,11 +2205,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"3️⃣ *Link a device* চাপো\n"
                 f"4️⃣ *Link with phone number* চাপো\n"
                 f"5️⃣ উপরের code type করো\n\n"
-                f"✅ Code enter করার পর *Connected!* চাপো।",
+                f"✅ Code enter করলেই WhatsApp connected হয়ে যাবে।",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Connected!", callback_data="wa_confirm_connected")],
                     [InlineKeyboardButton("🔄 New Code", callback_data="wa_connect")],
+                    [InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")],
                 ])
             )
         except Exception as e:
@@ -2619,6 +2673,7 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_wa_connect, pattern="^wa_connect$"))
     app.add_handler(CallbackQueryHandler(cb_wa_status, pattern="^wa_status$"))
     app.add_handler(CallbackQueryHandler(cb_wa_confirm_connected, pattern="^wa_confirm_connected$"))
+    app.add_handler(CallbackQueryHandler(cb_wa_already_connected, pattern="^wa_already_connected$"))
     app.add_handler(CallbackQueryHandler(cb_wa_disconnect, pattern="^wa_disconnect$"))
 
     app.add_handler(CallbackQueryHandler(cb_tm_create, pattern="^tm_create$"))
