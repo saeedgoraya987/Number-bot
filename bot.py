@@ -388,19 +388,40 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         logger.info(f"✅ Input filled: {filled}")
         await asyncio.sleep(2)
 
-        # Step 3: Next button — JS দিয়ে click
-        await page.evaluate("""() => {
-            const all = Array.from(document.querySelectorAll('button, div[role="button"]'));
-            const btn = all.find(el => el.innerText && 
-                (el.innerText.toLowerCase().includes('next') || 
-                 el.innerText.toLowerCase().includes('এগিয়ে')));
-            if (btn) btn.click();
-            // অথবা Enter press
-            const inp = document.querySelector('input');
-            if (inp) inp.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true}));
+        # Step 3: Next button — সব possible উপায়ে click
+        await asyncio.sleep(1)
+
+        next_clicked = await page.evaluate("""() => {
+            // Method 1: data-testid
+            const byTestId = document.querySelector("[data-testid='link-device-phone-num-next-btn']");
+            if (byTestId) { byTestId.click(); return 'testid'; }
+
+            // Method 2: arrow/submit button (WhatsApp Web এ → arrow button)
+            const allBtns = Array.from(document.querySelectorAll('button, div[role="button"], span[role="button"]'));
+            
+            // type=submit button
+            const submitBtn = document.querySelector('button[type="submit"]');
+            if (submitBtn) { submitBtn.click(); return 'submit'; }
+
+            // Next text
+            const nextBtn = allBtns.find(b => {
+                const t = (b.innerText || b.textContent || '').toLowerCase().trim();
+                return t === 'next' || t === '→' || t === '>' || t === 'ok';
+            });
+            if (nextBtn) { nextBtn.click(); return 'next-text'; }
+
+            // শেষ button
+            if (allBtns.length > 0) {
+                allBtns[allBtns.length - 1].click();
+                return 'last-btn';
+            }
+            return null;
         }""")
-        logger.info("✅ Next clicked")
-        await asyncio.sleep(4)
+        logger.info(f"✅ Next click method: {next_clicked}")
+
+        # Enter key দিয়েও try করো
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(5)
 
         # Step 4: Pairing code extract
         code = None
