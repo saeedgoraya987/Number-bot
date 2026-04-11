@@ -406,25 +406,57 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         # Step 3: Next button — সব possible উপায়ে click
         await asyncio.sleep(1)
 
-        # Next button — data-testid দিয়ে সরাসরি
+        # Next button — number type করার পর enable হওয়া পর্যন্ত wait করো
+        await asyncio.sleep(2)
         next_clicked = None
-        try:
-            next_btn = page.locator("[data-testid='link-device-phone-num-next-btn']").first
-            await next_btn.wait_for(state="visible", timeout=5000)
-            await next_btn.scroll_into_view_if_needed()
-            await next_btn.click(force=True)
-            next_clicked = "testid"
-            logger.info("✅ Next clicked via testid")
-        except:
-            pass
 
+        # Method 1: data-testid দিয়ে wait + click
+        for attempt in range(5):
+            try:
+                next_btn = page.locator("[data-testid='link-device-phone-num-next-btn']").first
+                await next_btn.wait_for(state="visible", timeout=3000)
+                is_disabled = await next_btn.is_disabled()
+                logger.info(f"🔘 Next btn disabled: {is_disabled}, attempt {attempt+1}")
+                if not is_disabled:
+                    await next_btn.click()
+                    next_clicked = "testid"
+                    logger.info("✅ Next clicked via testid")
+                    break
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.info(f"⚠️ testid attempt {attempt+1}: {e}")
+                await asyncio.sleep(1)
+
+        # Method 2: JS দিয়ে force click
         if not next_clicked:
-            # Enter key
+            result = await page.evaluate("""() => {
+                const btn = document.querySelector("[data-testid='link-device-phone-num-next-btn']");
+                if (btn) {
+                    btn.removeAttribute('disabled');
+                    btn.click();
+                    return 'js-click';
+                }
+                // সব button এর মধ্যে arrow বা submit খোঁজো
+                const btns = Array.from(document.querySelectorAll('button'));
+                for (const b of btns) {
+                    if (b.type === 'submit' || b.getAttribute('data-testid')?.includes('next')) {
+                        b.removeAttribute('disabled');
+                        b.click();
+                        return 'submit-btn';
+                    }
+                }
+                return null;
+            }""")
+            next_clicked = result
+            logger.info(f"✅ Next via JS: {result}")
+
+        # Method 3: Enter key
+        if not next_clicked:
             await page.keyboard.press("Enter")
             next_clicked = "enter"
-            logger.info("✅ Next via Enter key")
+            logger.info("✅ Next via Enter")
 
-        logger.info(f"✅ Next click method: {next_clicked}")
+        logger.info(f"✅ Final next method: {next_clicked}")
         await asyncio.sleep(6)
 
         # Step 4: Pairing code extract
