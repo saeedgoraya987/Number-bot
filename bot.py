@@ -1961,7 +1961,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await update.message.reply_text("❌ Invalid number. Example: `8801712345678`", parse_mode="Markdown")
 
         loading = await update.message.reply_text(
-            "⏳ *WhatsApp Web এ connect হচ্ছে...\n\n⌛ এটা ৩০-৬০ সেকেন্ড সময় নিতে পারে। অপেক্ষা করুন।",
+            "⏳ *WhatsApp Web এ connect হচ্ছে...*\n\n⌛ এটা ৩০-৬০ সেকেন্ড সময় নিতে পারে। অপেক্ষা করুন।",
             parse_mode="Markdown"
         )
         try:
