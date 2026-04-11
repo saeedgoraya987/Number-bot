@@ -511,8 +511,28 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         await asyncio.sleep(2)  # WhatsApp server response wait
 
         # ─── Step 4: Pairing Code Extraction ───
-        # WhatsApp Web এ code display হওয়ার জন্য অপেক্ষা করো
         code = None
+
+        # Common English words যেগুলো pairing code হতে পারে না
+        WORD_BLACKLIST = {
+            "THEN","LINK","CODE","NEXT","BACK","MORE","SCAN","OPEN","HOME",
+            "HELP","CHAT","CALL","MENU","DONE","SENT","FROM","WITH","THIS",
+            "YOUR","HAVE","THAT","WHAT","WHEN","WILL","BEEN","ALSO","THEY",
+            "SURE","HERE","JUST","INTO","OVER","ONLY","MAKE","COME","TAKE",
+            "KNOW","TIME","YEAR","GOOD","SOME","LIKE","THAN","EVEN","MUCH",
+            "WANT","LOOK","SUCH","GIVE","MOST","TELL","VERY","WELL","NEED",
+            "PHON","NUMB","DEVI","REQU","ENTE","CLIC","DIRE","LOAD","WAIT",
+            "PLEA","SIGN","NOTI","INFO","PAGE","LOGO","ICON","EDIT","OPEN",
+            "TYPE","EACH","SAME","AREA","STEP","PART","SHOW","USED","MUST",
+            "ONCE","LONG","DOES","SEND","KEEP","WORD","HIGH","AWAY","HAND",
+            "BOTH","FIND","FORM","ABLE","EVEN","EVER","WORK","FACE","NEAR",
+            "LATE","LIVE","TURN","PLAY","MOVE","REAL","RATE","LEFT","HOLD",
+            "PLAN","BASE","FULL","LAST","NAME","STOP","NEED","MARK","MAIN",
+            "FEEL","SIDE","PAST","CITY","MIND","SAID","CASE","TAKE","MADE",
+            "WAYS","LIFE","NEXT","USED","DONE","BEST","READ","BLUE","FREE",
+            "WENT","EYES","TOLD","USED","DONE","THEM","SUCH","LIKE","BOTH",
+            "THEN","LINK","ENTR","NTER","HONE","UMBE","EVIC","OTIN","IRST",
+        }
 
         for attempt in range(60):  # max 120 seconds
             await asyncio.sleep(2)
@@ -522,35 +542,35 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
             try:
                 el = page.locator("[data-testid='link-device-phone-num-code']").first
                 txt = await el.inner_text(timeout=2000)
-                logger.info(f"🔎 testid raw text: '{txt}'")
+                logger.info(f"🔎 testid raw: '{txt}'")
                 clean = re.sub(r'[^A-Z0-9]', '', txt.upper().strip())
                 if len(clean) == 8:
-                    code = f"{clean[:4]}-{clean[4:]}"
-                    logger.info(f"🎉 Code via testid: {code}")
-                    break
+                    p1, p2 = clean[:4], clean[4:]
+                    if p1 not in WORD_BLACKLIST and p2 not in WORD_BLACKLIST:
+                        code = f"{p1}-{p2}"
+                        logger.info(f"🎉 Code via testid: {code}")
+                        break
             except:
                 pass
 
-            # ── Method 2: JS — DOM এ সরাসরি খোঁজো ──
+            # ── Method 2: JS DOM search ──
             try:
                 result = await page.evaluate("""() => {
-                    // 1. data-testid যেগুলোতে 'code' আছে
                     const els = Array.from(document.querySelectorAll('[data-testid]'));
                     for (const el of els) {
                         const tid = el.getAttribute('data-testid') || '';
                         if (tid.includes('code') || tid.includes('pairing')) {
                             const t = (el.innerText || el.textContent || '')
-                                .trim().replace(/\\s/g, '').toUpperCase();
+                                .trim().replace(/\\s/g,'').toUpperCase();
                             if (/^[A-Z0-9]{8}$/.test(t)) return t.slice(0,4)+'-'+t.slice(4);
                             if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(t)) return t;
                         }
                     }
-
-                    // 2. Leaf node এ exactly XXXX-XXXX format
+                    // Leaf node এ exactly XXXX-XXXX
                     const all = Array.from(document.querySelectorAll('span, div, p'));
                     for (const el of all) {
                         if (el.children.length === 0) {
-                            const t = (el.innerText || el.textContent || '').trim().toUpperCase();
+                            const t = (el.innerText || '').trim().toUpperCase();
                             if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(t)) return t;
                             if (/^[A-Z0-9]{8}$/.test(t)) return t.slice(0,4)+'-'+t.slice(4);
                         }
@@ -558,29 +578,43 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
                     return null;
                 }""")
                 if result:
-                    # Phone number এর সাথে match করলে বাদ দাও
                     clean_r = re.sub(r'[^A-Z0-9]', '', result)
-                    if clean_r not in digits and clean_r not in digits[-8:]:
+                    p1, p2 = clean_r[:4], clean_r[4:]
+                    if (clean_r not in digits and
+                        clean_r not in digits[-8:] and
+                        p1 not in WORD_BLACKLIST and
+                        p2 not in WORD_BLACKLIST):
                         code = result
                         logger.info(f"🎉 Code via JS DOM: {code}")
                         break
             except:
                 pass
 
-            # ── Method 3: body text থেকে XXXX-XXXX pattern ──
+            # ── Method 3: body text থেকে XXXX-XXXX ──
             try:
                 body_text = await page.evaluate("() => document.body.innerText")
-                logger.info(f"📄 Body snippet: {body_text[:300]}")
+                logger.info(f"📄 Body: {body_text[:200]}")
 
-                # Pattern: exactly XXXX-XXXX (4 alphanum dash 4 alphanum)
                 matches = re.findall(r'\b([A-Z0-9]{4})[- ]([A-Z0-9]{4})\b', body_text.upper())
                 for p1, p2 in matches:
                     combined = p1 + p2
-                    # Phone number এর অংশ হলে skip
+                    # Phone number অংশ হলে skip
                     if combined in digits or p1 in digits or p2 in digits:
                         continue
-                    # Pure digits হলে skip (that's not a pairing code)
+                    # Pure digits হলে skip
                     if combined.isdigit():
+                        continue
+                    # Common English words হলে skip
+                    if p1 in WORD_BLACKLIST or p2 in WORD_BLACKLIST:
+                        continue
+                    # দুটোই pure alphabetic হলে skip (real code এ digit থাকে সাধারণত)
+                    # তবে mixed হলে allow করো
+                    # অন্তত একটায় digit থাকতে হবে অথবা দুটোই mixed হতে হবে
+                    has_digit = any(c.isdigit() for c in combined)
+                    is_mixed = (any(c.isalpha() for c in combined) and any(c.isdigit() for c in combined))
+                    # যদি সব alpha এবং common word না হলেও skip করো
+                    # কারণ real WA code এ সাধারণত digit+letter mix থাকে
+                    if not has_digit and combined.isalpha():
                         continue
                     code = f"{p1}-{p2}"
                     logger.info(f"🎉 Code from body: {code}")
@@ -593,7 +627,7 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         if not code:
             try:
                 body = await page.evaluate("() => document.body.innerText")
-                logger.error(f"❌ Code not found after all attempts. Body:\n{body[:1500]}")
+                logger.error(f"❌ Code not found. Body:\n{body[:1500]}")
             except:
                 pass
             raise Exception("Pairing code পাওয়া যায়নি। কিছুক্ষণ পর আবার try করো।")
