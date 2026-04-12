@@ -896,9 +896,14 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
 
-    wa_connected = _green_state.get("authorized", False)
+    # ── শুধু যে user নিজে WhatsApp connect করেছে সে-ই WA check পাবে ──
+    user_wa_connected = (
+        _green_state.get("authorized", False)
+        and str(_green_owner.get("uid") or "") == uid
+    )
+
     nums_text = "\n".join(
-        f"{i+1}. `+{n}`" + (" ⏳" if wa_connected else "")
+        f"{i+1}. `+{n}`" + (" ⏳" if user_wa_connected else "")
         for i, n in enumerate(nums)
     )
 
@@ -910,25 +915,31 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💵 *Earnings per OTP:* {price:.2f} taka\n\n"
             f"📞 *Numbers:*\n{nt}\n\n"
             f"📌 OTP automatically আসবে।"
-            + ("\n📱=WA আছে ❌=নেই" if wa_connected else "")
+            + ("\n📱=WA আছে ❌=নেই" if user_wa_connected else "")
         )
 
-    buttons = [
-        [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
-        [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
-        [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
-    ]
-    if not wa_connected:
-        buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
+    if user_wa_connected:
+        buttons = [
+            [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
+            [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
+            [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
+            [InlineKeyboardButton("🔴 Logout WhatsApp", callback_data="wa_disconnect")],
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
+            [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
+            [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
+            [InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")],
+        ]
 
     await query.edit_message_text(make_msg(nums_text), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
-    # Background এ WA check করো — bot block হবে না
-    if wa_connected:
+    # Background এ WA check — শুধু owner এর জন্য
+    if user_wa_connected:
         chat_id = query.message.chat_id
         msg_id  = query.message.message_id
         async def do_wa_check():
-            # সব number একসাথে parallel check করো
             results = await asyncio.gather(
                 *[check_wa_number(n, uid) for n in nums],
                 return_exceptions=True
@@ -977,10 +988,15 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     country = countries.get(cc, {"flag": "🌍", "name": cc})
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
-    wa_connected = _green_state.get("authorized", False)
+
+    # শুধু owner user এর জন্য WA check
+    user_wa_connected = (
+        _green_state.get("authorized", False)
+        and str(_green_owner.get("uid") or "") == uid
+    )
 
     nums_text = "\n".join(
-        f"{i+1}. `+{n}`" + (" ⏳" if wa_connected else "")
+        f"{i+1}. `+{n}`" + (" ⏳" if user_wa_connected else "")
         for i, n in enumerate(nums)
     )
 
@@ -992,24 +1008,30 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💵 *Earnings per OTP:* {price:.2f} taka\n\n"
             f"📞 *Numbers:*\n{nt}\n\n"
             f"📌 OTP automatically আসবে।"
-            + ("\n📱=WA আছে ❌=নেই" if wa_connected else "")
+            + ("\n📱=WA আছে ❌=নেই" if user_wa_connected else "")
         )
 
-    buttons = [
-        [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
-        [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
-        [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
-    ]
-    if not wa_connected:
-        buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
+    if user_wa_connected:
+        buttons = [
+            [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
+            [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
+            [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
+            [InlineKeyboardButton("🔴 Logout WhatsApp", callback_data="wa_disconnect")],
+        ]
+    else:
+        buttons = [
+            [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
+            [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
+            [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
+            [InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")],
+        ]
 
     await query.edit_message_text(make_msg_new(nums_text), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
-    if wa_connected:
+    if user_wa_connected:
         chat_id = query.message.chat_id
         msg_id  = query.message.message_id
         async def do_wa_check_new():
-            # সব number একসাথে parallel check করো
             results = await asyncio.gather(
                 *[check_wa_number(n, uid) for n in nums],
                 return_exceptions=True
