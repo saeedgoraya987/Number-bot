@@ -513,155 +513,206 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         # ─── Step 4: Pairing Code Extraction ───
         code = None
 
-        WORD_BLACKLIST = {
-            "THEN","LINK","CODE","NEXT","BACK","MORE","SCAN","OPEN","HOME",
-            "HELP","CHAT","CALL","MENU","DONE","SENT","FROM","WITH","THIS",
-            "YOUR","HAVE","THAT","WHAT","WHEN","WILL","BEEN","ALSO","THEY",
-            "SURE","HERE","JUST","INTO","OVER","ONLY","MAKE","COME","TAKE",
-            "KNOW","TIME","YEAR","GOOD","SOME","LIKE","THAN","EVEN","MUCH",
-            "WANT","LOOK","SUCH","GIVE","MOST","TELL","VERY","WELL","NEED",
-            "PHON","NUMB","DEVI","REQU","ENTE","CLIC","DIRE","LOAD","WAIT",
-            "PLEA","SIGN","NOTI","INFO","PAGE","LOGO","ICON","EDIT","TYPE",
-            "STEP","SHOW","USED","MUST","ONCE","DOES","SEND","KEEP","WORD",
-            "AWAY","BOTH","FIND","FORM","ABLE","EVER","WORK","FACE","NEAR",
-            "LATE","LIVE","TURN","PLAY","MOVE","REAL","LEFT","HOLD","PLAN",
-            "FULL","LAST","NAME","STOP","MARK","MAIN","FEEL","SIDE","PAST",
-        }
-
-        for attempt in range(60):
-            await asyncio.sleep(2)
-            logger.info(f"🔍 Code scan {attempt+1}/60")
+        for attempt in range(30):
+            await asyncio.sleep(1 if attempt < 10 else 2)
+            logger.info(f"🔍 Code scan attempt {attempt+1}/30")
 
             # ── Method 1: data-testid ──
-            try:
-                el = page.locator("[data-testid='link-device-phone-num-code']").first
-                txt = await el.inner_text(timeout=2000)
-                logger.info(f"🔎 testid raw: '{txt}'")
-                clean = re.sub(r'[^A-Z0-9]', '', txt.upper())
-                if len(clean) == 8:
-                    p1, p2 = clean[:4], clean[4:]
-                    if p1 not in WORD_BLACKLIST and p2 not in WORD_BLACKLIST:
-                        code = f"{p1}-{p2}"
-                        logger.info(f"🎉 Code testid: {code}")
+            for code_testid in [
+                "link-device-phone-num-code",
+                "pairing-code", "otp", "code",
+            ]:
+                try:
+                    el = page.locator(f"[data-testid='{code_testid}']").first
+                    txt = await el.inner_text(timeout=2000)
+                    clean = re.sub(r'[^A-Z0-9]', '', txt.upper().strip())
+                    if len(clean) == 8:
+                        code = f"{clean[:4]}-{clean[4:]}"
+                        logger.info(f"🎉 testid={code_testid}: {code}")
                         break
-            except:
-                pass
+                except:
+                    pass
+            if code:
+                break
 
-            # ── Method 2: individual character boxes collect ──
-            # WhatsApp Web প্রতিটা character আলাদা box এ দেখায়
-            try:
-                chars = await page.evaluate("""() => {
-                    // pairing code area খোঁজো
-                    // সাধারণত একটা container এ 8টা single-char span/div থাকে
-                    const containers = Array.from(document.querySelectorAll('div, section, article'));
-                    
-                    for (const container of containers) {
-                        // Direct children যেগুলো single char
-                        const children = Array.from(container.children);
-                        const singleChars = children.filter(el => {
-                            const t = (el.innerText || el.textContent || '').trim();
-                            return /^[A-Z0-9]$/i.test(t);
-                        });
-                        
-                        if (singleChars.length === 8) {
-                            return singleChars.map(el => 
-                                (el.innerText || el.textContent || '').trim().toUpperCase()
-                            ).join('');
-                        }
-                        
-                        // Nested single chars
-                        const allSpans = Array.from(container.querySelectorAll('span, div'));
-                        const charSpans = allSpans.filter(el => {
-                            if (el.children.length > 0) return false;
-                            const t = (el.innerText || el.textContent || '').trim();
-                            return /^[A-Z0-9]$/i.test(t);
-                        });
-                        
-                        if (charSpans.length === 8) {
-                            const code = charSpans.map(el =>
-                                (el.innerText || el.textContent || '').trim().toUpperCase()
-                            ).join('');
-                            return code;
-                        }
-                    }
-                    return null;
-                }""")
-                if chars and len(chars) == 8:
-                    p1, p2 = chars[:4], chars[4:]
-                    if p1 not in WORD_BLACKLIST and p2 not in WORD_BLACKLIST:
-                        code = f"{p1}-{p2}"
-                        logger.info(f"🎉 Code from char boxes: {code}")
-                        break
-            except:
-                pass
-
-            # ── Method 3: JS DOM — testid contains code ──
+            # ── Method 1b: aria-label / role ──
             try:
                 result = await page.evaluate("""() => {
-                    const els = Array.from(document.querySelectorAll('[data-testid]'));
-                    for (const el of els) {
-                        const tid = (el.getAttribute('data-testid') || '').toLowerCase();
-                        if (tid.includes('code') || tid.includes('pairing')) {
-                            const t = (el.innerText || el.textContent || '')
-                                .trim().replace(/\\s/g,'').toUpperCase();
-                            if (/^[A-Z0-9]{8}$/.test(t)) return t.slice(0,4)+'-'+t.slice(4);
-                            if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(t)) return t;
-                        }
-                    }
-                    // leaf nodes
-                    const all = Array.from(document.querySelectorAll('span, div, p'));
-                    for (const el of all) {
-                        if (el.children.length === 0) {
-                            const t = (el.innerText || '').trim().toUpperCase();
-                            if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(t)) return t;
-                            if (/^[A-Z0-9]{8}$/.test(t)) return t.slice(0,4)+'-'+t.slice(4);
-                        }
+                    // data-testid এ 'code' আছে এমন সব element
+                    const byTestid = Array.from(document.querySelectorAll('[data-testid]'))
+                        .filter(el => el.getAttribute('data-testid').toLowerCase().includes('code'));
+                    for (const el of byTestid) {
+                        const t = (el.innerText || el.textContent || '').trim().replace(/[\s]+/g,'').toUpperCase();
+                        if (/^[A-Z0-9]{8}$/.test(t)) return t.slice(0,4)+'-'+t.slice(4);
+                        if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(t)) return t;
                     }
                     return null;
                 }""")
                 if result:
-                    clean_r = re.sub(r'[^A-Z0-9]', '', result)
-                    p1, p2 = clean_r[:4], clean_r[4:]
-                    if (clean_r not in digits and
-                        p1 not in WORD_BLACKLIST and
-                        p2 not in WORD_BLACKLIST and
-                        not clean_r.isdigit()):
-                        code = result if '-' in result else f"{p1}-{p2}"
-                        logger.info(f"🎉 Code JS DOM: {code}")
-                        break
+                    code = result
+                    logger.info(f"🎉 Code via testid-contains-code: {code}")
+                    break
             except:
                 pass
 
-            # ── Method 4: body text XXXX-XXXX (digit থাকা জরুরি) ──
-            try:
-                body_text = await page.evaluate("() => document.body.innerText")
-                if attempt % 5 == 0:
-                    logger.info(f"📄 Body: {body_text[:300]}")
+            # ── Method 2: JS evaluation — XXXX-XXXX বা XXXXXXXX pattern ──
+            found = await page.evaluate("""() => {
+                const results = [];
+                const all = Array.from(document.querySelectorAll('*'));
+                for (const el of all) {
+                    // শুধু leaf node (child element নেই)
+                    if (el.children.length === 0) {
+                        const t = (el.innerText || el.textContent || '').trim().toUpperCase();
+                        // XXXX-XXXX format
+                        if (/^[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(t)) {
+                            results.push(t);
+                        }
+                        // XXXXXXXX format (8 chars alphanumeric)
+                        if (/^[A-Z0-9]{8}$/.test(t)) {
+                            results.push(t.slice(0,4) + '-' + t.slice(4));
+                        }
+                    }
+                    // Container যে innerText এ XXXX-XXXX আছে
+                    const full = (el.innerText || '').trim().toUpperCase();
+                    const m = full.match(/\\b([A-Z0-9]{4})[\\s\\-]([A-Z0-9]{4})\\b/);
+                    if (m && results.length === 0) {
+                        results.push(m[1] + '-' + m[2]);
+                    }
+                }
+                return [...new Set(results)];
+            }""")
 
-                for m in re.finditer(r'\b([A-Z0-9]{4})[- ]([A-Z0-9]{4})\b', body_text.upper()):
-                    p1, p2 = m.group(1), m.group(2)
-                    combined = p1 + p2
-                    if combined in digits or p1 in digits or p2 in digits:
+            logger.info(f"📦 JS found: {found[:5]}")
+            if found:
+                for candidate in found:
+                    clean_c = re.sub(r'[^A-Z0-9]', '', candidate)
+                    # phone number এর exact match হলে বাদ দাও, নাহলে নাও
+                    if clean_c == digits or clean_c == digits[-8:]:
                         continue
-                    if combined.isdigit() or combined.isalpha():
-                        continue
-                    if p1 in WORD_BLACKLIST or p2 in WORD_BLACKLIST:
-                        continue
-                    code = f"{p1}-{p2}"
-                    logger.info(f"🎉 Code from body: {code}")
+                    code = candidate if '-' in candidate else f"{clean_c[:4]}-{clean_c[4:]}"
+                    logger.info(f"🎉 Code from JS eval: {code}")
                     break
                 if code:
                     break
+
+            # ── Method 3: body innerText থেকে regex match ──
+            body_text = await page.evaluate("() => document.body.innerText")
+            # XXXX-XXXX বা XXXX XXXX pattern — digit ও allow
+            for m in re.finditer(r'\b([A-Z0-9]{4})[\s\-]([A-Z0-9]{4})\b', body_text.upper()):
+                p1, p2 = m.group(1), m.group(2)
+                combined = p1 + p2
+                # phone number এর অংশ না হলে নাও
+                if combined not in digits and p1 not in digits[-8:] and p2 not in digits[-8:]:
+                    code = f"{p1}-{p2}"
+                    logger.info(f"🎉 Code from body regex: {code}")
+                    break
+            if code:
+                break
+
+            # ── Method 4: span/div থেকে 4-char chunks collect — digit ও allow ──
+            all_texts = await page.evaluate("""() => {
+                const texts = [];
+                document.querySelectorAll('span, div[class], p').forEach(el => {
+                    if (el.children.length === 0) {
+                        const t = (el.innerText || el.textContent || '').trim();
+                        if (t.length >= 2 && t.length <= 10) texts.push(t);
+                    }
+                });
+                return texts;
+            }""")
+
+            # WhatsApp Web UI words যেগুলো code না
+            WA_UI_WORDS = {
+                "THEN", "LINK", "CODE", "NEXT", "BACK", "MORE", "SCAN",
+                "OPEN", "HOME", "HELP", "CHAT", "CALL", "MENU", "DONE",
+                "SENT", "FROM", "WITH", "THIS", "YOUR", "HAVE", "THAT",
+                "WHAT", "WHEN", "WILL", "BEEN", "ALSO", "THEY", "WHICH",
+                "PHONE", "NUMB", "DEVI", "REQU", "ENTE", "CLIC", "DIRE",
+                "HTTP", "HTTPS", "LOAD", "WAIT", "PLEA", "SIGN",
+            }
+
+            chunks = []
+            for t in all_texts:
+                clean = re.sub(r'[^A-Z0-9]', '', t.upper().strip())
+                if len(clean) == 4:
+                    if clean in digits or clean == digits[-4:] or clean == digits[:4]:
+                        continue
+                    if clean in WA_UI_WORDS:
+                        continue
+                    # Purely alphabetic common words বাদ দাও
+                    if clean.isalpha() and clean in {
+                        "THEN", "LINK", "CODE", "NEXT", "BACK", "MORE",
+                        "SCAN", "OPEN", "HOME", "HELP", "CHAT", "CALL",
+                        "MENU", "DONE", "SENT", "FROM", "WITH", "THIS",
+                        "YOUR", "HAVE", "THAT", "WHAT", "WHEN", "WILL",
+                        "BEEN", "ALSO", "THEY", "SURE", "HERE", "JUST",
+                        "INTO", "OVER", "ONLY", "MAKE", "COME", "TAKE",
+                        "KNOW", "TIME", "YEAR", "GOOD", "SOME", "LIKE",
+                        "THAN", "EVEN", "MUCH", "WANT", "LOOK", "SUCH",
+                        "GIVE", "MOST", "TELL", "VERY", "WELL", "NEED",
+                    }:
+                        continue
+                    chunks.append(clean)
+
+            logger.info(f"📦 chunks: {chunks[:10]}")
+
+            if len(chunks) >= 2:
+                seen = list(dict.fromkeys(chunks))
+                if len(seen) >= 2:
+                    code = f"{seen[0]}-{seen[1]}"
+                    logger.info(f"🎉 Code from chunks: {code}")
+                    break
+
+            # ── Method 5: পুরো body থেকে সব 4-char group নাও ──
+            try:
+                body_raw = await page.evaluate("() => document.body.innerText")
+                # সব 3-8 char alphanumeric words
+                all_words = re.findall(r'[A-Z0-9]{3,8}', body_raw.upper())
+                WA_BLACKLIST = {
+                    "THEN","LINK","CODE","NEXT","BACK","MORE","SCAN","OPEN",
+                    "HOME","HELP","CHAT","CALL","MENU","DONE","SENT","FROM",
+                    "WITH","THIS","YOUR","HAVE","THAT","WHAT","WHEN","WILL",
+                    "BEEN","ALSO","THEY","SURE","HERE","JUST","INTO","OVER",
+                    "ONLY","MAKE","COME","TAKE","KNOW","TIME","YEAR","GOOD",
+                    "SOME","LIKE","THAN","EVEN","MUCH","WANT","LOOK","SUCH",
+                    "GIVE","MOST","TELL","VERY","WELL","NEED","ENTE","HTTP",
+                    "NUMB","DEVI","REQU","CLIC","DIRE","LOAD","WAIT","PLEA",
+                    "SIGN","PHON","NOTI","FIED","INFO","PAGE","LOGO","ICON",
+                }
+                four_chars = [w for w in all_words if len(w) == 4
+                              and w not in digits and w != digits[-4:]
+                              and w not in WA_BLACKLIST]
+                logger.info(f"📦 body 4-char words: {four_chars[:15]}")
+                unique4 = list(dict.fromkeys(four_chars))
+                if len(unique4) >= 2:
+                    code = f"{unique4[0]}-{unique4[1]}"
+                    logger.info(f"🎉 Code from body words: {code}")
+                    break
             except:
                 pass
 
+            # ── Debug screenshot (attempt 5 এ) ──
+            if attempt == 4:
+                try:
+                    screenshot_path = f"/tmp/wa_debug_{uid}_{attempt}.png"
+                    await page.screenshot(path=screenshot_path, full_page=False)
+                    logger.info(f"📸 Screenshot saved: {screenshot_path}")
+                    # body text log করো
+                    logger.info(f"📄 Body preview: {body_text[:500]}")
+                except Exception as se:
+                    logger.warning(f"Screenshot failed: {se}")
+
         if not code:
+            # Final attempt: full body text dump করো debug এর জন্য
             try:
                 body = await page.evaluate("() => document.body.innerText")
-                logger.error(f"❌ Code not found. Body:\n{body[:2000]}")
+                logger.error(f"❌ Code not found. Body text: {body[:1000]}")
             except:
                 pass
-            raise Exception("Pairing code পাওয়া যায়নি। কিছুক্ষণ পর আবার try করো।")
+            raise Exception(
+                "Pairing code পাওয়া যায়নি। Phone এ notification দেখে manually enter করুন, "
+                "অথবা WhatsApp Web এর নতুন layout এর জন্য bot update দরকার।"
+            )
 
         return code
 
@@ -674,106 +725,65 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         raise e
 
 
-
-async def check_wa_number(phone: str, user_id: str):
-    uid  = str(user_id)
+async def monitor_wa_connection(uid: str, context):
+    """Background এ WhatsApp Web এর connection monitor করো"""
+    logger.info(f"🔍 WA connection monitor started for {uid}")
+    for _ in range(30):  # 5 minutes max
+        await asyncio.sleep(10)
+        sess = wa_sessions.get(uid, {})
+        page = sess.get("page")
+        if not page:
+            break
+        try:
+            body = await page.inner_text("body")
+            # Chat list দেখলে connected
+            if any(x in body for x in ["New chat", "Status", "Channels", "Archived", "Chats"]):
+                if not sess.get("connected"):
+                    wa_sessions[uid]["connected"] = True
+                    logger.info(f"✅ WA connected detected for {uid}")
+                    try:
+                        await context.bot.send_message(
+                            uid,
+                            "✅ *WhatsApp Connected!*\n\nএখন numbers assign হলে WhatsApp check দেখাবে।",
+                            parse_mode="Markdown"
+                        )
+                    except:
+                        pass
+                break
+        except:
+            pass
+    logger.info(f"🔍 WA monitor ended for {uid}")
+    """Check if number has WhatsApp - uses wa.me URL check"""
+    uid = str(user_id)
     sess = wa_sessions.get(uid, {})
     if not sess.get("connected") or not sess.get("page"):
         return None
 
-    page   = sess["page"]
+    page = sess["page"]
     digits = re.sub(r"\D", "", phone)
 
-    async def go_home():
-        try:
-            await page.goto("https://web.whatsapp.com/", wait_until="domcontentloaded", timeout=15000)
-            await asyncio.sleep(2)
-        except:
-            pass
-
-    async def is_session_alive():
-        try:
-            return await page.evaluate("""() => !!(
-                document.querySelector("[data-testid='chat-list']") ||
-                document.querySelector("[data-icon='new-chat-outline']") ||
-                document.querySelector("[data-testid='default-user']") ||
-                (document.querySelector("div[contenteditable='true']") &&
-                 !document.querySelector("[data-testid='popup-contents']"))
-            )""")
-        except:
-            return False
-
-    async def dismiss_popup():
-        try:
-            await page.evaluate("""() => {
-                const btn = document.querySelector(
-                    "[data-testid='popup-controls'] button, " +
-                    "[data-testid='alert-dialog'] button"
-                );
-                if (btn) btn.click();
-            }""")
-            await asyncio.sleep(0.3)
-        except:
-            pass
-
     try:
-        # Step 1: session alive কিনা check
-        alive = await is_session_alive()
-        if not alive:
-            await go_home()
-            await asyncio.sleep(3)
-            alive = await is_session_alive()
-            if not alive:
-                wa_sessions[uid]["connected"] = False
-                logger.warning(f"WA session dead for {uid}")
-                return None
-
-        # Step 2: number URL এ যাও
-        await page.goto(
-            f"https://web.whatsapp.com/send?phone={digits}",
-            wait_until="domcontentloaded",
-            timeout=20000
-        )
-
-        # Step 3: result আসা পর্যন্ত wait
-        result = None
-        for _ in range(70):
-            await asyncio.sleep(0.2)
-            state = await page.evaluate("""() => {
-                if (document.querySelector("[data-testid='conversation-compose-box-input']"))
-                    return 'valid';
-                if (document.querySelector("div[contenteditable='true'][data-tab]"))
-                    return 'valid';
-                const p = document.querySelector("[data-testid='popup-contents']");
-                if (p && p.offsetParent !== null && (p.innerText||'').length > 3)
-                    return 'invalid';
-                if (document.querySelector("[data-testid='alert-dialog']"))
-                    return 'invalid';
-                return 'loading';
-            }""")
-
-            if state == "valid":
-                result = True
-                logger.info(f"📱 +{digits} HAS WhatsApp")
-                break
-            elif state == "invalid":
-                result = False
-                logger.info(f"✅ +{digits} Fresh/No WA")
-                await dismiss_popup()
-                break
-
-        # Step 4: CRITICAL — main page এ ফিরে আসো
-        await go_home()
-
+        # wa.me URL দিয়ে check — page navigate না করে
+        result = await page.evaluate(f"""async () => {{
+            try {{
+                const resp = await fetch('https://wa.me/{digits}', {{
+                    method: 'HEAD',
+                    mode: 'no-cors',
+                    signal: AbortSignal.timeout(5000)
+                }});
+                return resp.status !== 404;
+            }} catch(e) {{
+                return null;
+            }}
+        }}""")
         return result
-
-    except Exception as e:
-        logger.warning(f"WA check error +{digits}: {e}")
-        await go_home()
+    except:
         return None
 
 
 
+
+# ─── Mail.tm API ───
 def mailtm_request(method: str, path: str, body=None, token=None):
     url = f"https://api.mail.tm{path}"
     headers = {
@@ -1147,29 +1157,6 @@ async def cb_select_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-async def build_numbers_message(svc_id, cc, nums, wa_status_map=None):
-    """নাম্বার message তৈরি করে। wa_status_map = {number: True/False/None}"""
-    country = countries.get(cc, {"flag": "🌍", "name": cc})
-    svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
-    price   = get_otp_price(cc)
-
-    lines = []
-    for i, n in enumerate(nums):
-        if wa_status_map is not None:
-            st = wa_status_map.get(n)
-            icon = " 📱" if st is True else (" ✅" if st is False else " 🔄")
-        else:
-            icon = ""
-        lines.append(f"{i+1}. `+{n}`{icon}")
-
-    msg = (
-        f"{svc['icon']} *{svc['name']}* — {country['flag']} *{country['name']}*\n"
-        f"💰 *Earnings per OTP:* {price:.2f} taka\n\n"
-        f"📞 *Your Numbers:*\n" + "\n".join(lines)
-    )
-    return msg
-
-
 async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not await ensure_verified(update, context):
@@ -1190,6 +1177,7 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not nums:
         return await query.answer("❌ Not enough numbers available.", show_alert=True)
 
+    # Release old numbers
     for old in sess["current_numbers"]:
         active_numbers.pop(old, None)
     save_active()
@@ -1199,49 +1187,65 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess["current_country"] = cc
     sess["last_number_time"] = now
 
+    country = countries.get(cc, {"flag": "🌍", "name": cc})
+    svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
+    price   = get_otp_price(cc)
+
+    nums_text_lines = []
     wa_connected = uid in wa_sessions and wa_sessions[uid].get("connected")
-    msg = await build_numbers_message(svc_id, cc, nums)
-    if wa_connected:
-        msg += "\n\n_⏳ WhatsApp checking..._"
-    s_buttons = [
+    for i, n in enumerate(nums):
+        icon = " ⏳" if wa_connected else ""
+        nums_text_lines.append(f"{i+1}. `+{n}`{icon}")
+    nums_text = "\n".join(nums_text_lines)
+
+    def build_msg(nt):
+        return (
+            f"✅ *{len(nums)} Number(s) Assigned!*\n\n"
+            f"{svc['icon']} *Service:* {svc['name']}\n"
+            f"{country['flag']} *Country:* {country['name']}\n"
+            f"💵 *Earnings per OTP:* {price:.2f} taka\n\n"
+            f"📞 *Numbers:*\n{nt}\n\n"
+            f"📌 OTP automatically আসবে।"
+            + (" 📱=WA আছে ❌=নেই ⏳=checking" if wa_connected else "")
+        )
+
+    buttons = [
         [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
         [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
         [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
     ]
     if not wa_connected:
-        s_buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
-    sent = await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(s_buttons))
+        buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
 
+    sent = await query.edit_message_text(
+        build_msg(nums_text), parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+    # WA connected থাকলে background এ check করো, তারপর update করো
     if wa_connected:
-        chat_id   = query.message.chat_id
-        message_id = query.message.message_id
-        _svc_id, _cc, _nums, _uid = svc_id, cc, nums[:], uid
-        async def wa_check_task_sc():
+        async def wa_check_task():
+            results = {}
+            for n in nums:
+                results[n] = await check_wa_number(n, uid)
+                await asyncio.sleep(0.5)
+            updated_lines = []
+            for i, n in enumerate(nums):
+                r = results.get(n)
+                icon = " 📱" if r is True else (" ❌" if r is False else " ⬜")
+                updated_lines.append(f"{i+1}. `+{n}`{icon}")
+            updated_text = "\n".join(updated_lines)
             try:
-                wa_map = {}
-                for n in _nums:
-                    try:
-                        wa_map[n] = await check_wa_number(n, _uid)
-                    except:
-                        wa_map[n] = None
-                    await asyncio.sleep(0)
-                updated_msg = await build_numbers_message(_svc_id, _cc, _nums, wa_status_map=wa_map)
-                final_btns = [
-                    [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
-                    [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{_svc_id}:{_cc}")],
-                    [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
-                ]
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id, message_id=message_id,
-                        text=updated_msg, parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(final_btns)
-                    )
-                except Exception as e:
-                    logger.warning(f"WA edit error (sc): {e}")
-            except Exception as e:
-                logger.warning(f"WA check task error (sc): {e}")
-        asyncio.create_task(wa_check_task_sc())
+                await context.bot.edit_message_text(
+                    build_msg(updated_text),
+                    chat_id=query.message.chat_id,
+                    message_id=query.message.message_id,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+            except:
+                pass
+        asyncio.create_task(wa_check_task())
 
 async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1270,102 +1274,62 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess["current_numbers"] = nums
     sess["last_number_time"] = now
 
+    country = countries.get(cc, {"flag": "🌍", "name": cc})
+    svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
+    price   = get_otp_price(cc)
     wa_connected = uid in wa_sessions and wa_sessions[uid].get("connected")
-    msg = await build_numbers_message(svc_id, cc, nums)
-    if wa_connected:
-        msg += "\n\n_⏳ WhatsApp checking..._"
-    n_buttons = [
-        [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
-        [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
-        [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
-    ]
-    if not wa_connected:
-        n_buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
-    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(n_buttons))
+    nums_text_lines = []
+    for i, n in enumerate(nums):
+        icon = " ⏳" if wa_connected else ""
+        nums_text_lines.append(f"{i+1}. `+{n}`{icon}")
+    nums_text = "\n".join(nums_text_lines)
 
-    if wa_connected:
-        chat_id2   = query.message.chat_id
-        message_id2 = query.message.message_id
-        _svc_id2, _cc2, _nums2, _uid2 = svc_id, cc, nums[:], uid
-        async def wa_check_task_nn():
-            try:
-                wa_map = {}
-                for n in _nums2:
-                    try:
-                        wa_map[n] = await check_wa_number(n, _uid2)
-                    except:
-                        wa_map[n] = None
-                    await asyncio.sleep(0)
-                updated_msg = await build_numbers_message(_svc_id2, _cc2, _nums2, wa_status_map=wa_map)
-                final_btns = [
-                    [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
-                    [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{_svc_id2}:{_cc2}")],
-                    [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
-                ]
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=chat_id2, message_id=message_id2,
-                        text=updated_msg, parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(final_btns)
-                    )
-                except Exception as e:
-                    logger.warning(f"WA edit error (nn): {e}")
-            except Exception as e:
-                logger.warning(f"WA check task error (nn): {e}")
-        asyncio.create_task(wa_check_task_nn())
+    def build_msg_new(nt):
+        return (
+            f"🔄 *{len(nums)} New Number(s)!*\n\n"
+            f"{svc['icon']} *Service:* {svc['name']}\n"
+            f"{country['flag']} *Country:* {country['name']}\n"
+            f"💵 *Earnings per OTP:* {price:.2f} taka\n\n"
+            f"📞 *Numbers:*\n{nt}\n\n"
+            f"📌 OTP automatically আসবে।"
+            + (" 📱=WA আছে ❌=নেই ⏳=checking" if wa_connected else "")
+        )
 
-async def cb_wa_check_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User manually চাপলে WA check করে — শুধু এই user এর জন্য, others unaffected"""
-    query = update.callback_query
-    await query.answer("⏳ WhatsApp check শুরু হচ্ছে...")
-    _, svc_id, cc = query.data.split(":")
-    uid  = str(update.effective_user.id)
-    sess = get_session(uid)
-    nums = sess.get("current_numbers", [])
-
-    if not nums:
-        return await query.answer("❌ No numbers found.", show_alert=True)
-
-    wa_connected = uid in wa_sessions and wa_sessions[uid].get("connected")
-    if not wa_connected:
-        return await query.answer("❌ WhatsApp connected নেই।", show_alert=True)
-
-    # "Checking..." message দেখাও
-    msg = await build_numbers_message(svc_id, cc, nums)
-    msg += "\n\n_⏳ WhatsApp checking..._"
     buttons = [
         [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
         [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
         [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
     ]
-    try:
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
-    except:
-        pass
+    if not wa_connected:
+        buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
 
-    # প্রতিটা নাম্বার check করো — একটার পর একটা
-    wa_map = {}
-    for n in nums:
-        try:
-            wa_map[n] = await check_wa_number(n, uid)
-        except:
-            wa_map[n] = None
-        # প্রতিটা check শেষে event loop কে সুযোগ দাও
-        await asyncio.sleep(0)
+    await query.edit_message_text(
+        build_msg_new(nums_text), parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
-    # Final result দেখাও
-    updated_msg = await build_numbers_message(svc_id, cc, nums, wa_status_map=wa_map)
-    done_buttons = [
-        [InlineKeyboardButton("📨 Open OTP Group", url=OTP_GROUP)],
-        [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
-        [InlineKeyboardButton("🔍 Re-check WA", callback_data=f"wacheck:{svc_id}:{cc}")],
-        [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
-    ]
-    try:
-        await query.edit_message_text(updated_msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(done_buttons))
-    except:
-        pass
-
+    if wa_connected:
+        async def wa_check_new():
+            results = {}
+            for n in nums:
+                results[n] = await check_wa_number(n, uid)
+                await asyncio.sleep(0.5)
+            updated_lines = []
+            for i, n in enumerate(nums):
+                r = results.get(n)
+                icon = " 📱" if r is True else (" ❌" if r is False else " ⬜")
+                updated_lines.append(f"{i+1}. `+{n}`{icon}")
+            try:
+                await context.bot.edit_message_text(
+                    build_msg_new("\n".join(updated_lines)),
+                    chat_id=query.message.chat_id,
+                    message_id=query.message.message_id,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons)
+                )
+            except:
+                pass
+        asyncio.create_task(wa_check_new())
 
 async def cb_back_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1582,42 +1546,16 @@ async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Page আছে এবং WhatsApp Web loaded কিনা check করো
     if page and not sess.get("connected"):
         try:
-            # Language-independent DOM check — body text এর উপর নির্ভর না করে
-            is_conn = await page.evaluate("""() => {
-                // Chat list বা compose box DOM element থাকলে connected
-                const domSelectors = [
-                    '[data-testid="chat-list"]',
-                    '[data-testid="conversation-compose-box-input"]',
-                    '[data-testid="default-user"]',
-                    'div[contenteditable="true"]',
-                    '[data-icon="new-chat-outline"]',
-                    '#app [tabindex="-1"][role="application"]',
-                ];
-                for (const sel of domSelectors) {
-                    try { if (document.querySelector(sel)) return true; } catch(e) {}
-                }
-                // Body text fallback — English + Bengali + other common languages
-                const body = (document.body && document.body.innerText) || '';
-                const connKw = [
-                    'New chat', 'Status', 'Channels', 'Archived', 'Chats',
-                    'নতুন চ্যাট', 'চ্যাট', 'নতুন', 'Nouveau', 'Nuevo',
-                ];
-                for (const kw of connKw) {
-                    if (body.includes(kw)) return true;
-                }
-                return false;
-            }""")
-            if is_conn:
+            body = await page.inner_text("body")
+            # Chat list দেখলে connected
+            if any(x in body for x in ["New chat", "Status", "Channels", "Archived"]):
                 wa_sessions[uid]["connected"] = True
-                logger.info(f"✅ WA status check: connected detected for user {uid}")
-        except Exception as e:
-            logger.warning(f"WA status check error for {uid}: {e}")
+        except: pass
 
     conn  = uid in wa_sessions and wa_sessions[uid].get("connected")
-    text  = "✅ WhatsApp connected!\n\nNumber assign হলে ✅/❌ দেখাবে।" if conn else "🔴 WhatsApp connected নেই।\n\nCode enter করার পরে আবার Check Status চাপো।"
+    text  = "✅ WhatsApp connected!\n\nNumber assign হলে ✅/❌ দেখাবে।" if conn else "🔴 WhatsApp connected নেই।\n\nCode enter করলে আবার Check Status চাপো।"
     btns  = [[InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")]] if conn else \
-            [[InlineKeyboardButton("📱 New Connect", callback_data="wa_connect")],
-             [InlineKeyboardButton("🔄 Check Status Again", callback_data="wa_status")]]
+            [[InlineKeyboardButton("📱 Connect", callback_data="wa_connect")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(btns))
 
 async def cb_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1945,6 +1883,7 @@ async def cb_admin_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not get_session(uid)["is_admin"] and not is_admin(uid):
         return await query.answer("❌ Admin only")
     await query.answer()
+
     await query.edit_message_text(
         f"⚙️ *Bot Settings*\n\n"
         f"📞 Number Count: *{settings['defaultNumberCount']}*\n"
@@ -2458,12 +2397,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         loading = await update.message.reply_text(
             "⏳ *WhatsApp Web এ connect হচ্ছে...*\n\n"
-            "⌛ এটা ৩০-৬০ সেকেন্ড সময় নিতে পারে। অপেক্ষা করুন।\n\n"
+            "⌛ ৩০-৬০ সেকেন্ড সময় নিতে পারে।\n"
             "✅ এই সময়ে bot এর অন্য features ব্যবহার করতে পারবে।",
             parse_mode="Markdown"
         )
 
-        # Background task এ চালাও — bot block হবে না
         async def wa_connect_task():
             try:
                 code = await get_wa_pairing_code(phone, uid)
@@ -2480,61 +2418,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"2. Settings → Linked Devices\n"
                     f"3. Link a Device → *Link with phone number*\n"
                     f"4. উপরের code enter করো\n\n"
-                    f"⏰ ৫ মিনিটের মধ্যে enter করো।",
+                    f"✅ Code enter করার পর *Check Status* চাপো।",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("✅ Check Status", callback_data="wa_status")],
                         [InlineKeyboardButton("🔄 New Code", callback_data="wa_connect")],
                     ])
                 )
-
-                # Background auto-detect: user code enter করার পরে automatically connected detect করবে
-                async def auto_detect_connection():
-                    logger.info(f"🔄 Auto-detect started for user {uid}")
-                    for _ in range(60):  # 5 minutes max (60 × 5s)
-                        await asyncio.sleep(5)
-                        try:
-                            s = wa_sessions.get(uid, {})
-                            p = s.get("page")
-                            if not p or s.get("connected"):
-                                break
-                            is_conn = await p.evaluate("""() => {
-                                const domSelectors = [
-                                    '[data-testid="chat-list"]',
-                                    '[data-testid="conversation-compose-box-input"]',
-                                    '[data-testid="default-user"]',
-                                    'div[contenteditable="true"]',
-                                    '[data-icon="new-chat-outline"]',
-                                ];
-                                for (const sel of domSelectors) {
-                                    try { if (document.querySelector(sel)) return true; } catch(e) {}
-                                }
-                                const body = (document.body && document.body.innerText) || '';
-                                const connKw = ['New chat','Status','Channels','Archived','Chats','নতুন চ্যাট','চ্যাট'];
-                                for (const kw of connKw) {
-                                    if (body.includes(kw)) return true;
-                                }
-                                return false;
-                            }""")
-                            if is_conn:
-                                wa_sessions[uid]["connected"] = True
-                                logger.info(f"✅ Auto-detected WA connected for user {uid}")
-                                await context.bot.send_message(
-                                    uid,
-                                    "✅ *WhatsApp Connected!*\n\nসফলভাবে connect হয়েছে! এখন number check করতে পারবেন।",
-                                    parse_mode="Markdown",
-                                    reply_markup=InlineKeyboardMarkup([
-                                        [InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")]
-                                    ])
-                                )
-                                break
-                        except Exception as e:
-                            logger.warning(f"Auto-detect loop error for {uid}: {e}")
-                            break
-                    logger.info(f"🔄 Auto-detect ended for user {uid}")
-
-                asyncio.create_task(auto_detect_connection())
-
+                # Background এ connection monitor
+                asyncio.create_task(monitor_wa_connection(uid, context))
             except Exception as e:
                 try: await loading.delete()
                 except: pass
@@ -2976,7 +2868,6 @@ def main():
     app.add_handler(CallbackQueryHandler(cb_select_country, pattern="^cc:"))
     app.add_handler(CallbackQueryHandler(cb_new_numbers, pattern="^newnum:"))
     app.add_handler(CallbackQueryHandler(cb_back_services, pattern="^back_services$"))
-    app.add_handler(CallbackQueryHandler(cb_wa_check_numbers, pattern="^wacheck:"))
 
     app.add_handler(CallbackQueryHandler(cb_start_withdraw, pattern="^start_withdraw$"))
     app.add_handler(CallbackQueryHandler(cb_withdraw_method, pattern="^wm:"))
