@@ -651,7 +651,7 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
 
 
 async def monitor_wa_connection(uid: str, context):
-    """Background এ WhatsApp Web connection monitor করো"""
+    """Background এ WhatsApp Web connection monitor করো — connect এবং disconnect দুটোই detect করো"""
     logger.info(f"🔍 WA monitor started for {uid}")
 
     async def is_wa_connected(page) -> bool:
@@ -682,12 +682,28 @@ async def monitor_wa_connection(uid: str, context):
         except:
             return False
 
-    for _ in range(60):  # 60 x 5s = 5 minutes
+    # ── Phase 1: Connected হওয়া পর্যন্ত wait করো (30 মিনিট max) ──
+    for attempt in range(360):
         await asyncio.sleep(5)
         sess = wa_sessions.get(uid, {})
         page = sess.get("page")
         if not page:
-            break
+            return
+
+        # প্রতি ৫০ সেকেন্ডে একবার root navigate করো
+        # কারণ: pairing code enter করার পর headless browser auto-redirect না-ও করতে পারে
+        if attempt > 0 and attempt % 10 == 0:
+            try:
+                await page.goto(
+                    "https://web.whatsapp.com/",
+                    wait_until="domcontentloaded",
+                    timeout=15000
+                )
+                await asyncio.sleep(3)
+                logger.info(f"🔄 WA monitor: navigated to root, uid={uid}, attempt={attempt}")
+            except Exception as nav_err:
+                logger.warning(f"WA monitor navigate error: {nav_err}")
+
         if await is_wa_connected(page):
             if not sess.get("connected"):
                 wa_sessions[uid]["connected"] = True
@@ -701,6 +717,58 @@ async def monitor_wa_connection(uid: str, context):
                 except:
                     pass
             break
+    else:
+        # 30 মিনিটে connect হয়নি — exit
+        logger.info(f"⏰ WA monitor timeout for uid={uid}")
+        return
+
+    # ── Phase 2: Connected থাকা অবস্থায় logout detect করো ──
+    logger.info(f"🔍 WA logout monitor started for uid={uid}")
+    logout_fail_count = 0  # consecutive failure count
+
+    while True:
+        await asyncio.sleep(30)  # প্রতি ৩০ সেকেন্ডে check
+
+        sess = wa_sessions.get(uid, {})
+        page = sess.get("page")
+
+        # session manually disconnect হলে বন্ধ করো
+        if not page or not sess.get("connected"):
+            logger.info(f"🛑 WA logout monitor stopped (session cleared) for uid={uid}")
+            break
+
+        try:
+            still_connected = await is_wa_connected(page)
+        except:
+            still_connected = False
+
+        if still_connected:
+            logout_fail_count = 0  # সব ঠিক আছে, counter reset
+            continue
+
+        # Connected ছিল না — navigate করে confirm করো
+        logout_fail_count += 1
+        logger.warning(f"⚠️ WA possibly logged out, uid={uid}, fail={logout_fail_count}")
+
+        if logout_fail_count >= 2:
+            # দুইবার fail হলে confirm — logout হয়ে গেছে
+            wa_sessions[uid]["connected"] = False
+            logger.info(f"🔴 WA logged out confirmed: uid={uid}")
+            try:
+                await context.bot.send_message(
+                    uid,
+                    "🔴 *WhatsApp Disconnected!*\n\n"
+                    "তোমার WhatsApp থেকে device logout হয়ে গেছে।\n\n"
+                    "📱 আবার connect করতে নিচের বাটন চাপো:",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📱 Reconnect WhatsApp", callback_data="wa_connect")]
+                    ])
+                )
+            except:
+                pass
+            break
+
 
 # Per-user lock — একসাথে একটাই WA page navigation হবে
 _wa_check_locks: dict = {}
@@ -1595,8 +1663,18 @@ async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess  = wa_sessions.get(uid, {})
     page  = sess.get("page")
 
+    # যদি ইতিমধ্যে connected হয় তাহলে navigate দরকার নেই
     if page and not sess.get("connected"):
         try:
+            # Pairing code দেওয়ার পর headless browser auto-navigate নাও করতে পারে।
+            # তাই web.whatsapp.com এ navigate করে fresh check করো।
+            await page.goto(
+                "https://web.whatsapp.com/",
+                wait_until="domcontentloaded",
+                timeout=20000
+            )
+            await asyncio.sleep(4)  # JS load হতে দাও
+
             result = await page.evaluate("""() => {
                 const CONNECTED = [
                     '[data-testid="side"]',
@@ -1622,8 +1700,8 @@ async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             "নতুন চ্যাট", "চ্যাট"]
                 if any(k in body for k in keywords):
                     wa_sessions[uid]["connected"] = True
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"cb_wa_status navigate error: {e}")
 
     conn  = uid in wa_sessions and wa_sessions[uid].get("connected")
     text  = "✅ WhatsApp connected!\n\nNumber assign হলে ✅/❌ দেখাবে।" if conn else \
