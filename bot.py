@@ -99,8 +99,9 @@ temp_mails     = load_json(TEMP_MAILS_FILE, {})
 earnings       = load_json(EARNINGS_FILE, {})
 withdrawals    = load_json(WITHDRAW_FILE, [])
 country_prices = load_json(COUNTRY_PRICES_FILE, {})
-wa_sessions    = {}  # { user_id: { browser, page, connected } }
-wa_check_tasks = {}  # { user_id: asyncio.Task } — চলতি WA check task
+wa_sessions    = {}  # { user_id: { browser, page, connected, pw } }
+wa_check_tasks = {}  # { user_id: asyncio.Task }
+
 
 countries = load_json(COUNTRIES_FILE, {
     "880": {"name": "Bangladesh", "flag": "🇧🇩"},
@@ -303,7 +304,7 @@ def generate_totp(secret: str):
 async def get_wa_pairing_code(phone: str, user_id: str) -> str:
     uid = str(user_id)
     digits = re.sub(r"\D", "", phone)
-    logger.info(f"📱 WA pairing for: +{digits}")
+    logger.info(f"📱 WA pairing for uid={uid}: +{digits}")
 
     # পুরনো session বন্ধ করো
     old = wa_sessions.get(uid, {})
@@ -345,8 +346,8 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
         )
     )
     wa_sessions[uid]["browser"] = browser
-    wa_sessions[uid]["page"] = page
-    wa_sessions[uid]["pw"] = pw_instance
+    wa_sessions[uid]["page"]    = page
+    wa_sessions[uid]["pw"]      = pw_instance
 
     try:
         logger.info("🌐 Loading WhatsApp Web...")
@@ -727,7 +728,7 @@ async def monitor_wa_connection(uid: str, context):
     logout_fail_count = 0  # consecutive failure count
 
     while True:
-        await asyncio.sleep(30)  # প্রতি ৩০ সেকেন্ডে check
+        await asyncio.sleep(60)  # প্রতি ৬০ সেকেন্ডে check
 
         sess = wa_sessions.get(uid, {})
         page = sess.get("page")
@@ -737,16 +738,31 @@ async def monitor_wa_connection(uid: str, context):
             logger.info(f"🛑 WA logout monitor stopped (session cleared) for uid={uid}")
             break
 
+        # Lock নিয়ে check করো — check_wa_number এর সাথে conflict এড়াতে
+        if uid not in _wa_check_locks:
+            _wa_check_locks[uid] = asyncio.Lock()
+
         try:
-            still_connected = await is_wa_connected(page)
-        except:
-            still_connected = False
+            async with _wa_check_locks[uid]:
+                # check_wa_number page কে /send?phone= URL এ রেখে যায়।
+                # তাই root navigate করে fresh check করো।
+                await page.goto(
+                    "https://web.whatsapp.com/",
+                    wait_until="domcontentloaded",
+                    timeout=15000
+                )
+                await asyncio.sleep(3)
+                still_connected = await is_wa_connected(page)
+        except Exception as e:
+            logger.warning(f"WA logout monitor check error uid={uid}: {e}")
+            still_connected = True  # error হলে logout ধরবো না
 
         if still_connected:
             logout_fail_count = 0  # সব ঠিক আছে, counter reset
+            logger.info(f"✅ WA still connected: uid={uid}")
             continue
 
-        # Connected ছিল না — navigate করে confirm করো
+        # Connected ছিল না — আরেকবার confirm করো
         logout_fail_count += 1
         logger.warning(f"⚠️ WA possibly logged out, uid={uid}, fail={logout_fail_count}")
 
@@ -899,6 +915,19 @@ async def check_wa_number(phone: str, user_id: str):
                 return None
 
             logger.info(f"📱 WA check +{digits}: {result}")
+
+            # ✅ Check শেষে root এ navigate করে রাখো।
+            # কারণ: logout monitor is_wa_connected() দিয়ে check করে — /send?phone= URL এ
+            # থাকলে [data-testid="side"] পাবে না, ভুলভাবে disconnected ধরবে।
+            try:
+                await page.goto(
+                    "https://web.whatsapp.com/",
+                    wait_until="domcontentloaded",
+                    timeout=10000
+                )
+            except:
+                pass
+
             return result
 
         except Exception as e:
