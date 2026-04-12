@@ -40,8 +40,8 @@ OTP_GROUP_ID     = -1003247504066
 
 # ─── Green API (WhatsApp) ───
 GREEN_API_URL   = "https://7107.api.greenapi.com"
-GREEN_INSTANCE  = "7107585099"
-GREEN_TOKEN     = "a8dbea06da06496d9621a717f2ab04a412c9495b62994e55ba"
+GREEN_INSTANCE  = "7107585194"
+GREEN_TOKEN     = "97f3ace72a9642adb3f1543ddc04da00d86aecf5f57945508f"
 
 # ─── Data Directory ───
 DATA_DIR = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", os.path.dirname(os.path.abspath(__file__)))
