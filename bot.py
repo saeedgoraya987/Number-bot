@@ -618,29 +618,54 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
 async def monitor_wa_connection(uid: str, context):
     """Background এ WhatsApp Web connection monitor করো"""
     logger.info(f"🔍 WA monitor started for {uid}")
-    for _ in range(30):
-        await asyncio.sleep(10)
+
+    async def is_wa_connected(page) -> bool:
+        try:
+            result = await page.evaluate("""() => {
+                const CONNECTED = [
+                    '[data-testid="side"]',
+                    '[data-testid="chat-list"]',
+                    '[data-testid="intro-md-beta-logo-dark"]',
+                    '[data-testid="intro-md-beta-logo-light"]',
+                    'div#side',
+                ];
+                const LOGIN = [
+                    '[data-testid="link-device-phone-num-code"]',
+                    'canvas[aria-label]',
+                    '[data-testid="qrcode"]',
+                ];
+                const hasLogin = LOGIN.some(s => !!document.querySelector(s));
+                const hasConn  = CONNECTED.some(s => !!document.querySelector(s));
+                return hasConn && !hasLogin;
+            }""")
+            if result:
+                return True
+            body = await page.inner_text("body")
+            keywords = ["New chat", "Status", "Channels", "Archived", "Chats",
+                        "নতুন চ্যাট", "চ্যাট", "আর্কাইভ"]
+            return any(k in body for k in keywords)
+        except:
+            return False
+
+    for _ in range(60):  # 60 x 5s = 5 minutes
+        await asyncio.sleep(5)
         sess = wa_sessions.get(uid, {})
         page = sess.get("page")
         if not page:
             break
-        try:
-            body = await page.inner_text("body")
-            if any(x in body for x in ["New chat", "Status", "Channels", "Archived", "Chats"]):
-                if not sess.get("connected"):
-                    wa_sessions[uid]["connected"] = True
-                    logger.info(f"✅ WA connected: {uid}")
-                    try:
-                        await context.bot.send_message(
-                            uid,
-                            "✅ *WhatsApp Connected!*\n\nএখন numbers assign হলে WA check দেখাবে।",
-                            parse_mode="Markdown"
-                        )
-                    except:
-                        pass
-                break
-        except:
-            pass
+        if await is_wa_connected(page):
+            if not sess.get("connected"):
+                wa_sessions[uid]["connected"] = True
+                logger.info(f"✅ WA connected: {uid}")
+                try:
+                    await context.bot.send_message(
+                        uid,
+                        "✅ *WhatsApp Connected!*\n\nএখন numbers assign হলে WA check দেখাবে।",
+                        parse_mode="Markdown"
+                    )
+                except:
+                    pass
+            break
 
 async def check_wa_number(phone: str, user_id: str):
     """Check if number has WhatsApp"""
@@ -1413,17 +1438,39 @@ async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess  = wa_sessions.get(uid, {})
     page  = sess.get("page")
 
-    # Page আছে এবং WhatsApp Web loaded কিনা check করো
     if page and not sess.get("connected"):
         try:
-            body = await page.inner_text("body")
-            # Chat list দেখলে connected
-            if any(x in body for x in ["New chat", "Status", "Channels", "Archived"]):
+            result = await page.evaluate("""() => {
+                const CONNECTED = [
+                    '[data-testid="side"]',
+                    '[data-testid="chat-list"]',
+                    '[data-testid="intro-md-beta-logo-dark"]',
+                    '[data-testid="intro-md-beta-logo-light"]',
+                    'div#side',
+                ];
+                const LOGIN = [
+                    '[data-testid="link-device-phone-num-code"]',
+                    'canvas[aria-label]',
+                    '[data-testid="qrcode"]',
+                ];
+                const hasLogin = LOGIN.some(s => !!document.querySelector(s));
+                const hasConn  = CONNECTED.some(s => !!document.querySelector(s));
+                return hasConn && !hasLogin;
+            }""")
+            if result:
                 wa_sessions[uid]["connected"] = True
-        except: pass
+            else:
+                body = await page.inner_text("body")
+                keywords = ["New chat", "Status", "Channels", "Archived", "Chats",
+                            "নতুন চ্যাট", "চ্যাট"]
+                if any(k in body for k in keywords):
+                    wa_sessions[uid]["connected"] = True
+        except:
+            pass
 
     conn  = uid in wa_sessions and wa_sessions[uid].get("connected")
-    text  = "✅ WhatsApp connected!\n\nNumber assign হলে ✅/❌ দেখাবে।" if conn else "🔴 WhatsApp connected নেই।\n\nCode enter করলে আবার Check Status চাপো।"
+    text  = "✅ WhatsApp connected!\n\nNumber assign হলে ✅/❌ দেখাবে।" if conn else \
+            "🔴 WhatsApp connected নেই।\n\nCode enter করলে আবার Check Status চাপো।"
     btns  = [[InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")]] if conn else \
             [[InlineKeyboardButton("📱 Connect", callback_data="wa_connect")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(btns))
