@@ -728,7 +728,7 @@ async def monitor_wa_connection(uid: str, context):
     logout_fail_count = 0  # consecutive failure count
 
     while True:
-        await asyncio.sleep(60)  # প্রতি ৬০ সেকেন্ডে check
+        await asyncio.sleep(30)  # প্রতি ৩০ সেকেন্ডে check
 
         sess = wa_sessions.get(uid, {})
         page = sess.get("page")
@@ -768,13 +768,21 @@ async def monitor_wa_connection(uid: str, context):
 
         if logout_fail_count >= 2:
             # দুইবার fail হলে confirm — logout হয়ে গেছে
-            wa_sessions[uid]["connected"] = False
             logger.info(f"🔴 WA logged out confirmed: uid={uid}")
+            # Browser cleanup
+            sess2 = wa_sessions.pop(uid, {})
+            if sess2.get("browser"):
+                try: await sess2["browser"].close()
+                except: pass
+            if sess2.get("pw"):
+                try: await sess2["pw"].stop()
+                except: pass
+            cancel_wa_check(uid)
             try:
                 await context.bot.send_message(
                     uid,
                     "🔴 *WhatsApp Disconnected!*\n\n"
-                    "তোমার WhatsApp থেকে device logout হয়ে গেছে।\n\n"
+                    "তোমার WhatsApp থেকে device remove হয়ে গেছে।\n\n"
                     "📱 আবার connect করতে নিচের বাটন চাপো:",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([
@@ -1377,24 +1385,42 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if wa_connected:
         chat_id = query.message.chat_id
         msg_id  = query.message.message_id
+
         async def do_wa_check():
+            page = wa_sessions.get(uid, {}).get("page")
+            if not page:
+                logger.warning(f"WA check skipped — no page uid={uid}")
+                return
+
             res = {}
-            for n in nums:
+            for i, n in enumerate(nums):
+                if asyncio.current_task().cancelled():
+                    return
+                if not wa_sessions.get(uid, {}).get("connected"):
+                    logger.warning(f"WA disconnected mid-check uid={uid}")
+                    break
+
                 r = await check_wa_number(n, uid)
                 res[n] = r
-            # ⚠️ navigate back করা হয় না — root URL navigate করলে session reset হয়
-            updated = "\n".join(
-                f"{i+1}. `+{n}`" + (" 📱" if res.get(n) is True else (" ❌" if res.get(n) is False else " ⬜"))
-                for i, n in enumerate(nums)
-            )
-            # শুরুতে wa_connected True ছিল, check শেষেও same buttons রাখো
-            # (check চলাকালীন session state পরিবর্তন হলেও user কে disconnect বলা হবে না)
-            try:
-                await context.bot.edit_message_text(
-                    make_msg(updated), chat_id=chat_id, message_id=msg_id,
-                    parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
+                logger.info(f"📱 WA check [{i+1}/{len(nums)}] +{n}: {r}")
+
+                # প্রতিটা check এর পর realtime update
+                updated = "\n".join(
+                    f"{j+1}. `+{m}`" + (
+                        " 📱" if res.get(m) is True
+                        else (" ❌" if res.get(m) is False
+                        else (" ⏳" if m not in res else " ⬜"))
+                    )
+                    for j, m in enumerate(nums)
                 )
-            except: pass
+                try:
+                    await context.bot.edit_message_text(
+                        make_msg(updated), chat_id=chat_id, message_id=msg_id,
+                        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
+                    )
+                except Exception as edit_err:
+                    logger.warning(f"edit_message error: {edit_err}")
+
         cancel_wa_check(uid)
         wa_check_tasks[uid] = asyncio.create_task(do_wa_check())
 
@@ -1459,24 +1485,45 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if wa_connected:
         chat_id = query.message.chat_id
         msg_id  = query.message.message_id
+
         async def do_wa_check_new():
             res = {}
-            for n in nums:
+            page = wa_sessions.get(uid, {}).get("page")
+            if not page:
+                logger.warning(f"WA check skipped — no page uid={uid}")
+                return
+
+            # প্রতি number check এর পর message update করো (realtime)
+            for i, n in enumerate(nums):
+                # Task cancel হলে বের হয়ে যাও
+                if asyncio.current_task().cancelled():
+                    return
+                # Connected check
+                if not wa_sessions.get(uid, {}).get("connected"):
+                    logger.warning(f"WA disconnected mid-check uid={uid}")
+                    break
+
                 r = await check_wa_number(n, uid)
                 res[n] = r
-            # ⚠️ navigate back করা হয় না — root URL navigate করলে session reset হয়
-            updated = "\n".join(
-                f"{i+1}. `+{n}`" + (" 📱" if res.get(n) is True else (" ❌" if res.get(n) is False else " ⬜"))
-                for i, n in enumerate(nums)
-            )
-            still_connected = wa_sessions.get(uid, {}).get("connected", False)
-            # শুরুতে wa_connected True ছিল, check শেষেও same buttons রাখো
-            try:
-                await context.bot.edit_message_text(
-                    make_msg_new(updated), chat_id=chat_id, message_id=msg_id,
-                    parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
+                logger.info(f"📱 WA check [{i+1}/{len(nums)}] +{n}: {r}")
+
+                # প্রতিটা check এর পর realtime update
+                updated = "\n".join(
+                    f"{j+1}. `+{m}`" + (
+                        " 📱" if res.get(m) is True
+                        else (" ❌" if res.get(m) is False
+                        else (" ⏳" if m not in res else " ⬜"))
+                    )
+                    for j, m in enumerate(nums)
                 )
-            except: pass
+                try:
+                    await context.bot.edit_message_text(
+                        make_msg_new(updated), chat_id=chat_id, message_id=msg_id,
+                        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
+                    )
+                except Exception as edit_err:
+                    logger.warning(f"edit_message error: {edit_err}")
+
         cancel_wa_check(uid)
         wa_check_tasks[uid] = asyncio.create_task(do_wa_check_new())
 
@@ -1687,29 +1734,25 @@ async def cb_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer("⏳ Checking...")
     uid   = str(update.effective_user.id)
     sess  = wa_sessions.get(uid, {})
     page  = sess.get("page")
 
-    # যদি ইতিমধ্যে connected হয় তাহলে navigate দরকার নেই
-    if page and not sess.get("connected"):
+    # ── সবসময় fresh page check করো (connected হলেও) ──
+    if page:
         try:
-            # Pairing code দেওয়ার পর headless browser auto-navigate নাও করতে পারে।
-            # তাই web.whatsapp.com এ navigate করে fresh check করো।
             await page.goto(
                 "https://web.whatsapp.com/",
                 wait_until="domcontentloaded",
                 timeout=20000
             )
-            await asyncio.sleep(4)  # JS load হতে দাও
+            await asyncio.sleep(4)
 
             result = await page.evaluate("""() => {
                 const CONNECTED = [
                     '[data-testid="side"]',
                     '[data-testid="chat-list"]',
-                    '[data-testid="intro-md-beta-logo-dark"]',
-                    '[data-testid="intro-md-beta-logo-light"]',
                     'div#side',
                 ];
                 const LOGIN = [
@@ -1719,32 +1762,61 @@ async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ];
                 const hasLogin = LOGIN.some(s => !!document.querySelector(s));
                 const hasConn  = CONNECTED.some(s => !!document.querySelector(s));
-                return hasConn && !hasLogin;
+                if (hasLogin) return 'LOGGED_OUT';
+                if (hasConn)  return 'CONNECTED';
+                return 'UNKNOWN';
             }""")
-            if result:
-                wa_sessions[uid]["connected"] = True
-            else:
-                body = await page.inner_text("body")
-                keywords = ["New chat", "Status", "Channels", "Archived", "Chats",
-                            "নতুন চ্যাট", "চ্যাট"]
-                if any(k in body for k in keywords):
-                    wa_sessions[uid]["connected"] = True
-        except Exception as e:
-            logger.warning(f"cb_wa_status navigate error: {e}")
 
-    conn  = uid in wa_sessions and wa_sessions[uid].get("connected")
-    text  = "✅ WhatsApp connected!\n\nNumber assign হলে ✅/❌ দেখাবে।" if conn else \
-            "🔴 WhatsApp connected নেই।\n\nCode enter করলে আবার Check Status চাপো।"
-    btns  = [[InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")]] if conn else \
-            [[InlineKeyboardButton("📱 Connect", callback_data="wa_connect")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(btns))
+            body = await page.inner_text("body")
+            keywords = ["New chat", "Status", "Channels", "Archived", "Chats",
+                        "নতুন চ্যাট", "চ্যাট"]
+            body_connected = any(k in body for k in keywords)
+
+            if result == "CONNECTED" or body_connected:
+                wa_sessions[uid]["connected"] = True
+                logger.info(f"✅ WA status check: connected uid={uid}")
+            else:
+                # Disconnect detected — session cleanup
+                wa_sessions[uid]["connected"] = False
+                logger.info(f"🔴 WA status check: disconnected uid={uid} result={result}")
+        except Exception as e:
+            logger.warning(f"cb_wa_status check error uid={uid}: {e}")
+    else:
+        # page নেই — session নেই
+        if uid in wa_sessions:
+            wa_sessions[uid]["connected"] = False
+
+    conn = uid in wa_sessions and wa_sessions[uid].get("connected")
+    if conn:
+        text = "✅ *WhatsApp Connected!*\n\nNumber assign হলে ✅/❌ দেখাবে।"
+        btns = [
+            [InlineKeyboardButton("🔄 Refresh Status", callback_data="wa_status")],
+            [InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")],
+        ]
+    else:
+        text = "🔴 *WhatsApp Disconnected!*\n\nPhone থেকে device remove হয়েছে বা session শেষ।\n\nআবার connect করতে নিচের বাটন চাপো।"
+        btns = [[InlineKeyboardButton("📱 Reconnect", callback_data="wa_connect")]]
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
 
 async def cb_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid = str(update.effective_user.id)
-    wa_sessions.pop(uid, None)
-    await context.bot.send_message(uid, "🔴 *WhatsApp disconnected.*", parse_mode="Markdown")
+    sess = wa_sessions.pop(uid, {})
+    # Browser properly close করো
+    if sess.get("browser"):
+        try: await sess["browser"].close()
+        except: pass
+    if sess.get("pw"):
+        try: await sess["pw"].stop()
+        except: pass
+    # Pending check task cancel করো
+    cancel_wa_check(uid)
+    await query.edit_message_text(
+        "🔴 *WhatsApp Disconnected.*\n\nআবার connect করতে নিচের বাটন চাপো।",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📱 Reconnect", callback_data="wa_connect")]])
+    )
 
 # ─── Temp Mail ───
 async def handle_tempmail(update: Update, context: ContextTypes.DEFAULT_TYPE):
