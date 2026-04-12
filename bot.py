@@ -9,7 +9,6 @@ import re
 import time
 import asyncio
 import logging
-import shutil
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -22,7 +21,6 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, ConversationHandler
 )
-from playwright.async_api import async_playwright
 
 # ─── Logging ───
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -39,6 +37,11 @@ CHAT_GROUP       = "https://t.me/earning_hub_number_channel"
 CHAT_GROUP_ID    = -1003875142184
 OTP_GROUP        = "https://t.me/EarningHub_otp"
 OTP_GROUP_ID     = -1003247504066
+
+# ─── Green API (WhatsApp) ───
+GREEN_API_URL   = "https://7107.api.greenapi.com"
+GREEN_INSTANCE  = "7107585099"
+GREEN_TOKEN     = "a8dbea06da06496d9621a717f2ab04a412c9495b62994e55ba"
 
 # ─── Data Directory ───
 DATA_DIR = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", os.path.dirname(os.path.abspath(__file__)))
@@ -58,7 +61,7 @@ TEMP_MAILS_FILE    = os.path.join(DATA_DIR, "temp_mails.json")
 EARNINGS_FILE      = os.path.join(DATA_DIR, "earnings.json")
 WITHDRAW_FILE      = os.path.join(DATA_DIR, "withdrawals.json")
 COUNTRY_PRICES_FILE= os.path.join(DATA_DIR, "country_prices.json")
-WA_SESSIONS_DIR    = os.path.join(DATA_DIR, "wa_sessions")
+WA_OWNER_FILE      = os.path.join(DATA_DIR, "wa_owner.json")
 
 # ─── Default Settings ───
 DEFAULT_SETTINGS = {
@@ -99,8 +102,7 @@ temp_mails     = load_json(TEMP_MAILS_FILE, {})
 earnings       = load_json(EARNINGS_FILE, {})
 withdrawals    = load_json(WITHDRAW_FILE, [])
 country_prices = load_json(COUNTRY_PRICES_FILE, {})
-wa_sessions    = {}  # { user_id: { browser, page, connected } }
-wa_check_tasks = {}  # { user_id: asyncio.Task } — চলতি WA check task
+wa_sessions    = {}  # { user_id: { connected: bool } }
 
 countries = load_json(COUNTRIES_FILE, {
     "880": {"name": "Bangladesh", "flag": "🇧🇩"},
@@ -299,595 +301,186 @@ def generate_totp(secret: str):
     except:
         return None
 
-# ─── WhatsApp Pairing via Playwright ───
-async def get_wa_pairing_code(phone: str, user_id: str) -> str:
-    uid = str(user_id)
-    digits = re.sub(r"\D", "", phone)
-    logger.info(f"📱 WA pairing for: +{digits}")
+# ─── Green API (WhatsApp) Helpers ───
 
-    # পুরনো session বন্ধ করো
-    old = wa_sessions.get(uid, {})
-    if old.get("browser"):
-        try: await old["browser"].close()
-        except: pass
-    if old.get("pw"):
-        try: await old["pw"].stop()
-        except: pass
-    wa_sessions[uid] = {"browser": None, "page": None, "connected": False, "pw": None}
+# ─── Green API Global State ───
+# Single shared instance — একটাই WhatsApp connect থাকে
+_green_state  = {"authorized": False}  # cached authorization state
+_green_owner  = load_json(WA_OWNER_FILE, {"uid": None})  # bot restart এর পরেও owner মনে থাকে
+_wa_pair_lock = None                   # initialized lazily
 
-    chromium_path = (
-        os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH") or
-        shutil.which("chromium") or
-        shutil.which("chromium-browser") or
-        ("/usr/bin/chromium" if os.path.exists("/usr/bin/chromium") else None)
-    )
+def save_green_owner():
+    save_json(WA_OWNER_FILE, _green_owner)
 
-    pw_instance = await async_playwright().start()
-    launch_opts = dict(
-        headless=True,
-        args=[
-            "--no-sandbox", "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage", "--disable-gpu",
-            "--single-process", "--no-zygote",
-            "--window-size=1280,900",
-        ]
-    )
-    if chromium_path:
-        launch_opts["executable_path"] = chromium_path
-
-    browser = await pw_instance.chromium.launch(**launch_opts)
-    page = await browser.new_page(
-        viewport={"width": 1280, "height": 900},
-        user_agent=(
-            "Mozilla/5.0 (X11; Linux x86_64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        )
-    )
-    wa_sessions[uid]["browser"] = browser
-    wa_sessions[uid]["page"] = page
-    wa_sessions[uid]["pw"] = pw_instance
-
+def green_request(method: str, endpoint: str, body=None) -> dict:
+    """Synchronous Green API HTTP call (thread-safe, blocking)"""
+    url     = f"{GREEN_API_URL}/waInstance{GREEN_INSTANCE}/{endpoint}/{GREEN_TOKEN}"
+    headers = {"Content-Type": "application/json"}
+    data    = json.dumps(body).encode() if body else None
     try:
-        logger.info("🌐 Loading WhatsApp Web...")
-        await page.goto("https://web.whatsapp.com/", wait_until="domcontentloaded", timeout=60000)
-        await asyncio.sleep(4)
-
-        # Step 1: "Link with phone number" button click — multiple methods
-        clicked = False
-
-        # Method A: data-testid দিয়ে
-        for testid in ["link-device-phone-num-button", "link-with-phone-number"]:
-            try:
-                el = page.locator(f"[data-testid='{testid}']").first
-                await el.wait_for(state="visible", timeout=5000)
-                await el.click()
-                clicked = True
-                logger.info(f"✅ Phone btn clicked via testid={testid}")
-                break
-            except:
-                pass
-
-        # Method B: JS text search
-        if not clicked:
-            clicked = await page.evaluate("""() => {
-                const keywords = ['phone number', 'link with phone', 'phone'];
-                const els = Array.from(document.querySelectorAll('button, div[role="button"], span[role="button"]'));
-                for (const el of els) {
-                    const txt = (el.innerText || '').toLowerCase();
-                    if (keywords.some(k => txt.includes(k))) {
-                        el.click();
-                        return true;
-                    }
-                }
-                return false;
-            }""")
-            logger.info(f"✅ Phone btn via JS text: {clicked}")
-
-        # Method C: aria-label
-        if not clicked:
-            try:
-                el = page.get_by_role("button", name=re.compile("phone", re.IGNORECASE)).first
-                await el.click(timeout=5000)
-                clicked = True
-                logger.info("✅ Phone btn via aria-label")
-            except:
-                pass
-
-        await asyncio.sleep(3)
-
-        # Step 2: Country code + phone number input
-        country_prefix = ""
-        local_number = digits
-        for prefix in ["880", "91", "92", "1", "44", "977", "86", "81", "82", "66"]:
-            if digits.startswith(prefix):
-                country_prefix = prefix
-                local_number = digits[len(prefix):]
-                break
-
-        logger.info(f"📱 Country: +{country_prefix}, Local: {local_number}")
-
-        # ── React-compatible input method ──
-        # WhatsApp Web React এর জন্য nativeInputValueSetter + dispatchEvent দরকার
-        react_set_result = await page.evaluate(f"""() => {{
-            // React controlled input value set করার সঠিক পদ্ধতি
-            function setReactValue(el, value) {{
-                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value'
-                ).set;
-                nativeInputValueSetter.call(el, value);
-                el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                el.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true }}));
-            }}
-
-            const allInputs = Array.from(document.querySelectorAll('input'));
-            const visibleInputs = allInputs.filter(el => el.offsetParent !== null);
-            
-            console.log('Visible inputs count:', visibleInputs.length);
-            
-            if (visibleInputs.length === 0) {{
-                return {{ success: false, msg: 'No visible inputs found', count: allInputs.length }};
-            }}
-            
-            if (visibleInputs.length >= 2) {{
-                // দুটো field: country code + local number
-                setReactValue(visibleInputs[0], '{country_prefix}');
-                setReactValue(visibleInputs[1], '{local_number}');
-                visibleInputs[1].focus();
-                return {{ success: true, msg: 'two-field', cc: '{country_prefix}', num: '{local_number}' }};
-            }} else {{
-                // একটাই field — full digits
-                setReactValue(visibleInputs[0], '{digits}');
-                visibleInputs[0].focus();
-                return {{ success: true, msg: 'single-field', full: '{digits}' }};
-            }}
-        }}""")
-        logger.info(f"⌨️ React input result: {react_set_result}")
-
-        await asyncio.sleep(3)
-
-        # React state update নিশ্চিত করতে আরেকবার trigger
-        await page.evaluate("""() => {
-            const visibleInputs = Array.from(document.querySelectorAll('input')).filter(el => el.offsetParent !== null);
-            visibleInputs.forEach(el => {
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-            });
-        }""")
-
-        await asyncio.sleep(2)
-
-        # Step 3: Next button — fast approach
-        next_clicked = None
-
-        # Method 1: testid enabled হলে click (max 3 attempts, 1s each)
-        for attempt in range(3):
-            try:
-                next_btn = page.locator("[data-testid='link-device-phone-num-next-btn']").first
-                await next_btn.wait_for(state="visible", timeout=2000)
-                is_disabled = await next_btn.is_disabled()
-                logger.info(f"🔘 Next disabled={is_disabled} attempt={attempt+1}")
-                if not is_disabled:
-                    await next_btn.click()
-                    next_clicked = "testid"
-                    logger.info("✅ Next clicked (testid)")
-                    break
-                await asyncio.sleep(1)
-            except:
-                await asyncio.sleep(0.5)
-
-        # Method 2: Enter key — সবচেয়ে fast
-        if not next_clicked:
-            await page.keyboard.press("Enter")
-            next_clicked = "enter"
-            logger.info("✅ Next via Enter")
-
-        # Method 3: JS force (parallel — Enter এর পরেও)
-        try:
-            js_result = await page.evaluate("""() => {
-                let btn = document.querySelector("[data-testid='link-device-phone-num-next-btn']");
-                if (btn) {
-                    btn.removeAttribute('disabled');
-                    btn.removeAttribute('aria-disabled');
-                    btn.click();
-                    return 'js-ok';
-                }
-                const btns = Array.from(document.querySelectorAll('button'));
-                for (const b of btns) {
-                    const tid = b.getAttribute('data-testid') || '';
-                    if (tid.includes('next') || b.type === 'submit') {
-                        b.removeAttribute('disabled');
-                        b.click();
-                        return 'submit-ok';
-                    }
-                }
-                return 'not-found';
-            }""")
-            logger.info(f"✅ JS parallel: {js_result}")
-        except:
-            pass
-
-        logger.info(f"📌 next_clicked={next_clicked}")
-        await asyncio.sleep(2)  # WhatsApp server response wait
-
-        # ─── Step 4: Pairing Code Extraction ───
-        code = None
-
-        # WA pairing code সবসময় 8 char alphanumeric (XXXX-YYYY format)
-        # Pure alphabetic হতে পারে — digit requirement নেই
-        def is_valid_pairing_code(p1: str, p2: str) -> bool:
-            combined = p1 + p2
-            if len(combined) != 8:
-                return False
-            # Phone number এর অংশ হলে বাদ
-            if combined in digits or digits.endswith(combined) or combined in digits[-8:]:
-                return False
-            # Pure digits হলে বাদ (phone number fragment)
-            if combined.isdigit():
-                return False
-            # কমপক্ষে একটা letter থাকতে হবে
-            if not any(c.isalpha() for c in combined):
-                return False
-            return True
-
-        for attempt in range(90):  # max 180 seconds — WhatsApp slow হতে পারে
-            await asyncio.sleep(2)
-            logger.info(f"🔍 Code scan {attempt+1}/90")
-
-            # ── Method 1: data-testid — সবচেয়ে reliable ──
-            try:
-                el = page.locator("[data-testid='link-device-phone-num-code']").first
-                txt = await el.inner_text(timeout=2000)
-                logger.info(f"🔎 testid raw: '{txt}'")
-                clean = re.sub(r'[^A-Z0-9]', '', txt.upper())
-                if len(clean) == 8:
-                    p1, p2 = clean[:4], clean[4:]
-                    if is_valid_pairing_code(p1, p2):
-                        code = f"{p1}-{p2}"
-                        logger.info(f"🎉 Code testid: {code}")
-                        break
-            except:
-                pass
-
-            # ── Method 2: Individual character boxes (separator সহ) ──
-            try:
-                chars = await page.evaluate("""() => {
-                    // Single char span/div খোঁজো — separator dash বাদ দিয়ে
-                    const containers = Array.from(document.querySelectorAll('div, section'));
-                    for (const container of containers) {
-                        const allEls = Array.from(container.querySelectorAll('span, div'));
-                        const charEls = allEls.filter(el => {
-                            if (el.children.length > 0) return false;
-                            const t = (el.innerText || el.textContent || '').trim();
-                            return /^[A-Z0-9]$/i.test(t);
-                        });
-                        // 8 char (code) অথবা 9+ যেখানে separator আছে
-                        if (charEls.length === 8 || charEls.length === 9) {
-                            const chars = charEls
-                                .map(el => (el.innerText || el.textContent || '').trim().toUpperCase())
-                                .filter(t => /^[A-Z0-9]$/.test(t));
-                            if (chars.length === 8) return chars.join('');
-                        }
-                    }
-                    // ── Method 2b: aria-label বা data-* তে code ──
-                    const codeEls = document.querySelectorAll('[aria-label*="code" i], [data-code], [class*="code" i]');
-                    for (const el of codeEls) {
-                        const t = re = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
-                        const clean = t.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-                        if (clean.length === 8) return clean;
-                    }
-                    return null;
-                }""")
-                if chars and len(chars) == 8:
-                    p1, p2 = chars[:4], chars[4:]
-                    if is_valid_pairing_code(p1, p2):
-                        code = f"{p1}-{p2}"
-                        logger.info(f"🎉 Code char-boxes: {code}")
-                        break
-            except:
-                pass
-
-            # ── Method 3: body text — relaxed pattern ──
-            try:
-                body_text = await page.evaluate("() => document.body.innerText")
-                if attempt % 5 == 0:
-                    logger.info(f"📄 Body: {body_text[:300]}")
-
-                # Pattern 1: XXXX-YYYY বা XXXX YYYY
-                for m in re.finditer(r'\b([A-Z0-9]{4})[- ]([A-Z0-9]{4})\b', body_text.upper()):
-                    p1, p2 = m.group(1), m.group(2)
-                    if is_valid_pairing_code(p1, p2):
-                        code = f"{p1}-{p2}"
-                        logger.info(f"🎉 Code body pattern1: {code}")
-                        break
-
-                # Pattern 2: 8 consecutive alphanumeric (no separator)
-                if not code:
-                    for m in re.finditer(r'\b([A-Z][A-Z0-9]{3})([A-Z0-9]{4})\b', body_text.upper()):
-                        p1, p2 = m.group(1), m.group(2)
-                        if is_valid_pairing_code(p1, p2):
-                            code = f"{p1}-{p2}"
-                            logger.info(f"🎉 Code body pattern2: {code}")
-                            break
-
-                if code:
-                    break
-            except:
-                pass
-
-            # ── Method 4: page HTML scan — last resort ──
-            if attempt % 10 == 9:  # প্রতি ২০ সেকেন্ডে একবার
-                try:
-                    html = await page.evaluate("() => document.body.innerHTML")
-                    for m in re.finditer(r'["\'>]([A-Z0-9]{4})-([A-Z0-9]{4})["\' <]', html.upper()):
-                        p1, p2 = m.group(1), m.group(2)
-                        if is_valid_pairing_code(p1, p2):
-                            code = f"{p1}-{p2}"
-                            logger.info(f"🎉 Code HTML: {code}")
-                            break
-                    if code:
-                        break
-                except:
-                    pass
-
-        if not code:
-            try:
-                body = await page.evaluate("() => document.body.innerText")
-                logger.error(f"❌ Not found. Body:\n{body[:2000]}")
-            except:
-                pass
-            raise Exception("Pairing code পাওয়া যায়নি। কিছুক্ষণ পর আবার try করো।")
-
-        return code
-
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
     except Exception as e:
-        try: await browser.close()
-        except: pass
-        try: await pw_instance.stop()
-        except: pass
-        wa_sessions[uid] = {"browser": None, "page": None, "connected": False, "pw": None}
-        raise e
+        logger.error(f"Green API error [{endpoint}]: {e}")
+        return {}
 
+async def green_get_state() -> str:
+    """authorized / notAuthorized / blocked / sleepMode"""
+    loop   = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: green_request("GET", "getStateInstance"))
+    return result.get("stateInstance", "notAuthorized")
+
+async def green_api_monitor(app):
+    """
+    Background task — Green API state পর্যবেক্ষণ।
+    Startup এ immediately state check করে _green_state set করে।
+    Logout হলে শুধু যার WhatsApp connect ছিল তাকেই notify করো।
+    """
+    logger.info("🟢 Green API monitor started")
+
+    # ── Startup: current state জেনে নাও ──
+    try:
+        init_state = await green_get_state()
+        _green_state["authorized"] = (init_state == "authorized")
+        logger.info(f"🟢 Green API initial state: {init_state}")
+
+        # যদি authorized এবং owner আছে — session restore করো
+        if init_state == "authorized" and _green_owner.get("uid"):
+            owner = str(_green_owner["uid"])
+            wa_sessions[owner] = {"connected": True}
+            logger.info(f"🔄 WA session restored for uid={owner}")
+    except Exception as e:
+        logger.error(f"Green API initial check error: {e}")
+
+    while True:
+        await asyncio.sleep(30)
+        try:
+            state    = await green_get_state()
+            was_auth = _green_state.get("authorized", False)
+            is_auth  = (state == "authorized")
+
+            if was_auth and not is_auth:
+                # ── Logout detected ──
+                _green_state["authorized"] = False
+                owner_uid = _green_owner.get("uid")
+                logger.warning(f"⚠️ Green API: WhatsApp logged out! owner={owner_uid}")
+
+                # শুধু যার WhatsApp ছিল তাকেই notify করো
+                if owner_uid:
+                    wa_sessions.pop(str(owner_uid), None)
+                    _green_owner["uid"] = None
+                    save_green_owner()
+                    try:
+                        await app.bot.send_message(
+                            int(owner_uid),
+                            "⚠️ *WhatsApp Disconnected!*\n\n"
+                            "তোমার WhatsApp থেকে bot logout হয়েছে।\n"
+                            "আবার connect করতে নিচের button চাপো।",
+                            parse_mode="Markdown",
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")
+                            ]])
+                        )
+                    except Exception as e:
+                        logger.error(f"Logout notify error: {e}")
+                else:
+                    wa_sessions.clear()
+
+            elif not was_auth and is_auth:
+                _green_state["authorized"] = True
+                logger.info("✅ Green API: WhatsApp authorized")
+            elif is_auth:
+                _green_state["authorized"] = True
+
+        except Exception as e:
+            logger.error(f"green_api_monitor error: {e}")
+
+async def get_wa_pairing_code(phone: str, user_id: str) -> str:
+    """
+    Green API phone-number pairing code।
+    Global lock: একসাথে একজনই pairing করতে পারবে।
+    """
+    global _wa_pair_lock
+    if _wa_pair_lock is None:
+        _wa_pair_lock = asyncio.Lock()
+
+    digits = re.sub(r"\D", "", phone)
+    logger.info(f"📱 Green API pairing for: +{digits}")
+
+    async with _wa_pair_lock:
+        loop   = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: green_request("POST", "getAuthorizationCode", {"phoneNumber": int(digits)})
+        )
+        logger.info(f"Green API pairing result: {result}")
+        if result.get("status") is True and result.get("code"):
+            code  = str(result["code"])
+            clean = re.sub(r"[^A-Z0-9]", "", code.upper())
+            if len(clean) >= 8:
+                return f"{clean[:4]}-{clean[4:8]}"
+            return code
+        raise Exception(
+            result.get("message") or
+            "Pairing code পাওয়া যায়নি। কিছুক্ষণ পর আবার try করো।"
+        )
 
 async def monitor_wa_connection(uid: str, context):
-    """Background এ WhatsApp Web connection monitor করো — connect ও disconnect দুটোই"""
-    logger.info(f"🔍 WA monitor started for {uid}")
-
-    async def get_wa_state(page) -> str:
-        """'CONNECTED', 'LOGGED_OUT', 'LOADING' return করে"""
-        try:
-            result = await page.evaluate("""() => {
-                const CONNECTED_SELS = [
-                    '[data-testid="side"]',
-                    '[data-testid="chat-list"]',
-                    '[data-testid="intro-md-beta-logo-dark"]',
-                    '[data-testid="intro-md-beta-logo-light"]',
-                    'div#side',
-                ];
-                const LOGOUT_SELS = [
-                    '[data-testid="link-device-phone-num-code"]',
-                    '[data-testid="link-device-phone-num-button"]',
-                    '[data-testid="link-with-phone-number"]',
-                    'canvas[aria-label]',
-                    '[data-testid="qrcode"]',
-                ];
-                const hasConn   = CONNECTED_SELS.some(s => !!document.querySelector(s));
-                const hasLogout = LOGOUT_SELS.some(s => !!document.querySelector(s));
-                if (hasConn && !hasLogout) return 'CONNECTED';
-                if (hasLogout) return 'LOGGED_OUT';
-                return 'LOADING';
-            }""")
-            if result == 'CONNECTED':
-                return 'CONNECTED'
-            if result == 'LOGGED_OUT':
-                return 'LOGGED_OUT'
-            # body text fallback
-            body = await page.inner_text("body")
-            conn_keywords = ["New chat", "Status", "Channels", "Archived", "Chats",
-                             "নতুন চ্যাট", "চ্যাট", "আর্কাইভ"]
-            if any(k in body for k in conn_keywords):
-                return 'CONNECTED'
-            return 'LOADING'
-        except:
-            return 'LOADING'
-
-    # ── Phase 1: Connected হওয়ার জন্য অপেক্ষা (max 5 min) ──
+    """
+    Pairing এর পর Green API state poll করো।
+    Authorized হলে user কে notify এবং owner হিসেবে track করো।
+    """
+    logger.info(f"🔍 Waiting for WA auth: {uid}")
     for _ in range(60):
         await asyncio.sleep(5)
-        sess = wa_sessions.get(uid, {})
-        if not sess.get("page"):
-            return
-        state = await get_wa_state(sess["page"])
-        if state == 'CONNECTED':
-            if not sess.get("connected"):
-                wa_sessions[uid]["connected"] = True
-                logger.info(f"✅ WA connected: {uid}")
+        try:
+            state = await green_get_state()
+            if state == "authorized":
+                _green_state["authorized"] = True
+                _green_owner["uid"]        = uid
+                save_green_owner()
+                wa_sessions[uid]           = {"connected": True}
+                logger.info(f"✅ WA connected: uid={uid}")
                 try:
                     await context.bot.send_message(
                         uid,
-                        "✅ *WhatsApp Connected!*\n\nএখন numbers assign হলে WA check দেখাবে।",
+                        "✅ *WhatsApp Connected!*\n\n"
+                        "এখন numbers assign হলে WA check দেখাবে।",
                         parse_mode="Markdown"
                     )
                 except:
                     pass
-            break  # Phase 2 এ যাও
-
-    # ── Phase 2: Connected থাকা পর্যন্ত monitor — logout হলে notify ──
-    logger.info(f"🔍 WA disconnect monitor started for {uid}")
-    logout_confirm_count = 0  # false alarm এড়াতে consecutive count
-
-    while True:
-        await asyncio.sleep(15)  # প্রতি ১৫ সেকেন্ডে check
-        sess = wa_sessions.get(uid, {})
-        if not sess.get("page") or not sess.get("connected"):
-            break  # manual disconnect হয়েছে
-
-        state = await get_wa_state(sess["page"])
-        logger.info(f"🔍 WA state for {uid}: {state}")
-
-        if state == 'CONNECTED':
-            logout_confirm_count = 0  # reset
-        elif state == 'LOGGED_OUT':
-            logout_confirm_count += 1
-            logger.info(f"⚠️ WA logout detect #{logout_confirm_count} for {uid}")
-            if logout_confirm_count >= 2:  # ২ বার confirm হলে notify
-                wa_sessions[uid]["connected"] = False
-                logger.warning(f"🔴 WA logged out confirmed for {uid}")
-                try:
-                    await context.bot.send_message(
-                        uid,
-                        "🔴 *WhatsApp Disconnected!*\n\n"
-                        "তোমার WhatsApp লিঙ্ক logout হয়ে গেছে।\n\n"
-                        "আবার connect করতে নিচের বাটন চাপো:",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("📱 Reconnect WhatsApp", callback_data="wa_connect")]
-                        ])
-                    )
-                except:
-                    pass
                 break
-        # LOADING হলে skip — page navigate হচ্ছে হয়তো
-
-
-# Per-user lock — একসাথে একটাই WA page navigation হবে
-_wa_check_locks: dict = {}
-
-def cancel_wa_check(uid: str):
-    """আগের WA check task cancel করো — নতুন batch শুরুর আগে call করো"""
-    uid = str(uid)
-    task = wa_check_tasks.get(uid)
-    if task and not task.done():
-        task.cancel()
-        logger.info(f"🛑 WA check task cancelled for uid={uid}")
-    wa_check_tasks.pop(uid, None)
-    # Lock reset করো — cancel হওয়া task lock ধরে থাকলে নতুন task hang করবে
-    if uid in _wa_check_locks:
-        lk = _wa_check_locks[uid]
-        if lk.locked():
-            try:
-                lk.release()
-            except RuntimeError:
-                pass
-        _wa_check_locks[uid] = asyncio.Lock()  # fresh lock
+        except Exception as e:
+            logger.warning(f"monitor_wa_connection error: {e}")
 
 async def check_wa_number(phone: str, user_id: str):
     """
-    Existing connected WA Web page navigate করে number check।
-    New tab খোলা হয় না → session reload নেই → অনেক দ্রুত (~5-8s/number)।
-    asyncio.Lock দিয়ে sequential access নিশ্চিত করা হয়েছে।
+    Green API checkWhatsapp — pure HTTP request।
+    Lock নেই — ১০০+ concurrent call একসাথে handle করতে পারে।
     """
-    uid    = str(user_id)
-    sess   = wa_sessions.get(uid, {})
-    if not sess.get("connected") or not sess.get("page"):
-        return None
-
-    page   = sess["page"]
-    digits = re.sub(r"\D", "", phone)
-
-    if uid not in _wa_check_locks:
-        _wa_check_locks[uid] = asyncio.Lock()
-
-    async with _wa_check_locks[uid]:
-        try:
-            # Existing page এ send URL এ navigate — session already loaded
-            await page.goto(
-                f"https://web.whatsapp.com/send?phone={digits}",
-                wait_until="domcontentloaded",
-                timeout=12000
-            )
-
-            # Chat input অথবা error popup — max 6 সেকেন্ড wait
-            try:
-                await page.wait_for_selector(
-                    'footer [contenteditable], '
-                    '[data-testid="conversation-compose-box-input"], '
-                    '[data-testid="compose-box-input"], '
-                    '[data-testid="popup-contents"], '
-                    '[role="alertdialog"], '
-                    'div[role="dialog"]',
-                    timeout=6000
-                )
-            except:
-                await asyncio.sleep(2)
-
-            # Error popup আসার জন্য 1s wait
-            await asyncio.sleep(1)
-
-            result = await page.evaluate("""() => {
-                // ── Login/Pairing screen detect ──
-                const LOGIN_SELS = [
-                    '[data-testid="link-device-phone-num-code"]',
-                    '[data-testid="link-device-phone-num-button"]',
-                    '[data-testid="link-with-phone-number"]',
-                    'canvas[aria-label]',
-                    '[data-testid="qrcode"]',
-                ];
-                const isLoginPage = LOGIN_SELS.some(s => !!document.querySelector(s));
-                if (isLoginPage) return 'LOGGED_OUT';
-
-                // ── Error popup সবার আগে check — "not on WA" হলে এটাই primary signal ──
-                const ERROR_WORDS = [
-                    'invalid', 'not on whatsapp', 'unable',
-                    'phone number shared', 'not registered',
-                    'no account', "isn't on whatsapp", 'check the phone number',
-                ];
-                const dialogs = document.querySelectorAll(
-                    '[data-testid="popup-contents"], div[role="dialog"], [role="alertdialog"]'
-                );
-                for (const d of dialogs) {
-                    if (!d.offsetParent) continue; // hidden element skip
-                    const t = (d.innerText || '').toLowerCase();
-                    if (ERROR_WORDS.some(w => t.includes(w))) return false;
-                    // Dialog আছে কিন্তু error word নেই — তাও not-on-WA হতে পারে
-                    if (t.length > 5) return false;
-                }
-
-                // ── Strict compose box check — footer এর ভেতরে থাকতে হবে ──
-                // [role="textbox"] বা search bar false positive দেয়, তাই বাদ
-                const STRICT_CHAT_SELS = [
-                    'footer [contenteditable="true"]',
-                    '[data-testid="conversation-compose-box-input"]',
-                    '[data-testid="compose-box-input"]',
-                ];
-                for (const s of STRICT_CHAT_SELS) {
-                    const el = document.querySelector(s);
-                    if (el && el.offsetParent !== null) return true; // visible element
-                }
-
-                // ── URL check — invalid হলে root এ redirect ──
-                if (window.location.pathname === '/' ||
-                    window.location.href === 'https://web.whatsapp.com/') {
-                    return false;
-                }
-
-                // ── send?phone= URL এ আছি কিন্তু compose নেই = not on WA ──
-                if (window.location.href.includes('/send?phone=')) {
-                    return null; // uncertain — timeout হয়েছে
-                }
-
-                return null;
-            }""")
-
-            # ── বারবার retry করে LOGGED_OUT confirm ──
-            if result == 'LOGGED_OUT':
-                # Page navigation এর সময় WA momentarily login screen দেখাতে পারে।
-                # check_wa_number এর ভেতর session কখনো False করা হবে না —
-                # শুধু None return করো, session intact থাকবে।
-                logger.warning(f"⚠️ WA login screen detected during check for +{digits} (uid={uid}), skipping number")
-                return None
-
-            logger.info(f"📱 WA check +{digits}: {result}")
-            return result
-
-        except Exception as e:
-            logger.warning(f"check_wa_number error +{digits}: {e}")
+    if not _green_state.get("authorized"):
+        state = await green_get_state()
+        if state != "authorized":
             return None
+        _green_state["authorized"] = True
 
-
-
-
+    digits = re.sub(r"\D", "", phone)
+    loop   = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: green_request("POST", "checkWhatsapp", {"phoneNumber": int(digits)})
+        )
+        logger.info(f"📱 WA check +{digits}: {result}")
+        exists = result.get("existsWhatsapp")
+        if exists is True:  return True
+        if exists is False: return False
+        return None
+    except Exception as e:
+        logger.warning(f"check_wa_number error +{digits}: {e}")
+        return None
 
 # ─── Mail.tm API ───
 def mailtm_request(method: str, path: str, body=None, token=None):
@@ -1297,7 +890,7 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
 
-    wa_connected = uid in wa_sessions and wa_sessions[uid].get("connected")
+    wa_connected = _green_state.get("authorized", False)
     nums_text = "\n".join(
         f"{i+1}. `+{n}`" + (" ⏳" if wa_connected else "")
         for i, n in enumerate(nums)
@@ -1331,27 +924,24 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = query.message.chat_id
         msg_id  = query.message.message_id
         async def do_wa_check():
-            res = {}
-            for n in nums:
-                res[n] = await check_wa_number(n, uid)
-                # প্রতিটা check শেষে সাথে সাথে update করো
-                live_text = "\n".join(
-                    f"{i+1}. `+{n}`" + (
-                        " 📱" if res.get(n) is True else
-                        " ❌" if res.get(n) is False else
-                        " ✅" if n in res else
-                        " ⏳"
-                    )
-                    for i, n in enumerate(nums)
+            # সব number একসাথে parallel check করো
+            results = await asyncio.gather(
+                *[check_wa_number(n, uid) for n in nums],
+                return_exceptions=True
+            )
+            res = {n: (r if not isinstance(r, Exception) else None)
+                   for n, r in zip(nums, results)}
+            updated = "\n".join(
+                f"{i+1}. `+{n}`" + (" 📱" if res.get(n) is True else (" ❌" if res.get(n) is False else " ⬜"))
+                for i, n in enumerate(nums)
+            )
+            try:
+                await context.bot.edit_message_text(
+                    make_msg(updated), chat_id=chat_id, message_id=msg_id,
+                    parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
                 )
-                try:
-                    await context.bot.edit_message_text(
-                        make_msg(live_text), chat_id=chat_id, message_id=msg_id,
-                        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
-                    )
-                except: pass
-        cancel_wa_check(uid)
-        wa_check_tasks[uid] = asyncio.create_task(do_wa_check())
+            except: pass
+        asyncio.create_task(do_wa_check())
 
 async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1383,7 +973,7 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     country = countries.get(cc, {"flag": "🌍", "name": cc})
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
-    wa_connected = uid in wa_sessions and wa_sessions[uid].get("connected")
+    wa_connected = _green_state.get("authorized", False)
 
     nums_text = "\n".join(
         f"{i+1}. `+{n}`" + (" ⏳" if wa_connected else "")
@@ -1417,27 +1007,24 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = query.message.chat_id
         msg_id  = query.message.message_id
         async def do_wa_check_new():
-            res = {}
-            for n in nums:
-                res[n] = await check_wa_number(n, uid)
-                # প্রতিটা check শেষে সাথে সাথে update করো
-                live_text = "\n".join(
-                    f"{i+1}. `+{n}`" + (
-                        " 📱" if res.get(n) is True else
-                        " ❌" if res.get(n) is False else
-                        " ✅" if n in res else
-                        " ⏳"
-                    )
-                    for i, n in enumerate(nums)
+            # সব number একসাথে parallel check করো
+            results = await asyncio.gather(
+                *[check_wa_number(n, uid) for n in nums],
+                return_exceptions=True
+            )
+            res = {n: (r if not isinstance(r, Exception) else None)
+                   for n, r in zip(nums, results)}
+            updated = "\n".join(
+                f"{i+1}. `+{n}`" + (" 📱" if res.get(n) is True else (" ❌" if res.get(n) is False else " ⬜"))
+                for i, n in enumerate(nums)
+            )
+            try:
+                await context.bot.edit_message_text(
+                    make_msg_new(updated), chat_id=chat_id, message_id=msg_id,
+                    parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
                 )
-                try:
-                    await context.bot.edit_message_text(
-                        make_msg_new(live_text), chat_id=chat_id, message_id=msg_id,
-                        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons)
-                    )
-                except: pass
-        cancel_wa_check(uid)
-        wa_check_tasks[uid] = asyncio.create_task(do_wa_check_new())
+            except: pass
+        asyncio.create_task(do_wa_check_new())
 
 async def cb_back_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1637,88 +1224,121 @@ async def cb_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid  = str(update.effective_user.id)
+
+    # আগে current state check করো
+    try:
+        cur_state = await green_get_state()
+    except:
+        cur_state = "notAuthorized"
+
+    if cur_state == "authorized":
+        owner_uid = _green_owner.get("uid")
+        if owner_uid and str(owner_uid) != str(uid):
+            # অন্য কেউ connect করেছে
+            return await query.edit_message_text(
+                "⚠️ *WhatsApp Already Connected!*\n\n"
+                "অন্য একজন ইতিমধ্যে connect করেছে।\n"
+                "নতুন connection এর জন্য admin এর সাথে যোগাযোগ করো।",
+                parse_mode="Markdown"
+            )
+        else:
+            # নিজেই আগে connect করেছিল — disconnect option দেখাও
+            return await query.edit_message_text(
+                "✅ *WhatsApp Already Connected!*\n\n"
+                "তোমার WhatsApp ইতিমধ্যে connected আছে।\n"
+                "নতুন নম্বর দিয়ে connect করতে আগে disconnect করো।",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")],
+                    [InlineKeyboardButton("📊 Check Status", callback_data="wa_status")],
+                ])
+            )
+
     sess = get_session(uid)
     sess["state"] = "wa_waiting_number"
-    await context.bot.send_message(
-        update.effective_user.id,
-        "📱 WhatsApp Connect\n\nতোমার WhatsApp নম্বর দাও (country code সহ):\nExample: 8801712345678"
+    await query.edit_message_text(
+        "📱 *WhatsApp Connect*\n\n"
+        "তোমার WhatsApp নম্বর দাও (country code সহ):\n"
+        "Example: `8801712345678`",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Cancel", callback_data="goto_main")
+        ]])
     )
 
 async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await query.answer("⏳ Checking...")
     uid   = str(update.effective_user.id)
-    sess  = wa_sessions.get(uid, {})
-    page  = sess.get("page")
 
-    if page and not sess.get("connected"):
-        try:
-            result = await page.evaluate("""() => {
-                const CONNECTED = [
-                    '[data-testid="side"]',
-                    '[data-testid="chat-list"]',
-                    '[data-testid="intro-md-beta-logo-dark"]',
-                    '[data-testid="intro-md-beta-logo-light"]',
-                    'div#side',
-                ];
-                const LOGIN = [
-                    '[data-testid="link-device-phone-num-code"]',
-                    'canvas[aria-label]',
-                    '[data-testid="qrcode"]',
-                ];
-                const hasLogin = LOGIN.some(s => !!document.querySelector(s));
-                const hasConn  = CONNECTED.some(s => !!document.querySelector(s));
-                return hasConn && !hasLogin;
-            }""")
-            if result:
-                wa_sessions[uid]["connected"] = True
-            else:
-                body = await page.inner_text("body")
-                keywords = ["New chat", "Status", "Channels", "Archived", "Chats",
-                            "নতুন চ্যাট", "চ্যাট"]
-                if any(k in body for k in keywords):
-                    wa_sessions[uid]["connected"] = True
-        except:
-            pass
+    # Green API থেকে real-time state নাও
+    try:
+        state = await green_get_state()
+    except:
+        state = "notAuthorized"
 
-    conn  = uid in wa_sessions and wa_sessions[uid].get("connected")
-    text  = "✅ WhatsApp connected!\n\nNumber assign হলে ✅/❌ দেখাবে।" if conn else \
-            "🔴 WhatsApp connected নেই।\n\nCode enter করলে আবার Check Status চাপো।"
-    btns  = [[InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")]] if conn else \
-            [[InlineKeyboardButton("📱 Connect", callback_data="wa_connect")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(btns))
+    conn = (state == "authorized")
+    if conn:
+        wa_sessions[uid] = {"connected": True}
+    else:
+        wa_sessions.pop(uid, None)
+
+    STATE_MAP = {
+        "authorized":    "✅ *WhatsApp Connected!*\n\nNumber assign হলে 📱/❌ দেখাবে।",
+        "notAuthorized": "🔴 *WhatsApp connected নেই।*\n\nCode enter করলে আবার Check Status চাপো।",
+        "blocked":       "⛔ *WhatsApp instance blocked!*\n\nAdmin কে জানান।",
+        "sleepMode":     "😴 *WhatsApp sleep mode এ আছে।*\n\nকিছুক্ষণ পর আবার check করো।",
+    }
+    text = STATE_MAP.get(state, f"❓ Unknown state: {state}")
+    btns = [[InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")]] if conn else \
+           [[InlineKeyboardButton("📱 Connect", callback_data="wa_connect")]]
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+
+async def green_logout() -> bool:
+    """Green API থেকে WhatsApp logout করো (actual device unlink)"""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: green_request("GET", "logout")
+    )
+    logger.info(f"Green API logout result: {result}")
+    return result.get("isLogout", False) or result.get("stateInstance") == "notAuthorized"
 
 async def cb_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("🔴 Disconnecting...")
+    await query.answer("⏳ Disconnecting...")
     uid = str(update.effective_user.id)
-    # Browser বন্ধ করো
-    sess = wa_sessions.get(uid, {})
-    if sess.get("browser"):
-        try: await sess["browser"].close()
-        except: pass
-    if sess.get("pw"):
-        try: await sess["pw"].stop()
-        except: pass
-    wa_sessions.pop(uid, None)
-    cancel_wa_check(uid)
+
+    # শুধু owner-ই disconnect করতে পারবে
+    owner_uid = _green_owner.get("uid")
+    if owner_uid and str(owner_uid) != str(uid):
+        return await query.edit_message_text(
+            "❌ *তুমি এই WhatsApp এর owner নও।*",
+            parse_mode="Markdown"
+        )
+
+    # Green API তে actual logout
     try:
-        await query.edit_message_text(
-            "🔴 *WhatsApp Disconnected.*\n\nআবার connect করতে নিচের বাটন চাপো:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")]
-            ])
-        )
-    except:
-        await context.bot.send_message(
-            uid,
-            "🔴 *WhatsApp Disconnected.*\n\nআবার connect করতে 📱 Connect WhatsApp চাপো:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")]
-            ])
-        )
+        await green_logout()
+    except Exception as e:
+        logger.error(f"Green API logout error: {e}")
+
+    # State clear করো
+    _green_state["authorized"] = False
+    wa_sessions.pop(str(uid), None)
+    if _green_owner.get("uid") == uid:
+        _green_owner["uid"] = None
+        save_green_owner()
+
+    await query.edit_message_text(
+        "🔴 *WhatsApp Disconnected!*\n\n"
+        "তোমার WhatsApp bot থেকে unlink হয়েছে।\n"
+        "আবার connect করতে নিচের button চাপো।",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")
+        ]])
+    )
 
 # ─── Temp Mail ───
 async def handle_tempmail(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2551,14 +2171,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await update.message.reply_text("❌ Invalid number. Example: `8801712345678`", parse_mode="Markdown")
 
         loading = await update.message.reply_text(
-            "⏳ *WhatsApp Web এ connect হচ্ছে...*\n\n"
-            "⌛ ৩০-৬০ সেকেন্ড সময় নিতে পারে।\n"
-            "✅ এই সময়ে bot এর সব features কাজ করবে।",
+            "⏳ *Pairing code নিচ্ছে...*\n\n"
+            "⌛ কয়েক সেকেন্ড অপেক্ষা করো।",
             parse_mode="Markdown"
         )
 
         async def wa_task():
             try:
+                # যদি আগে থেকেই authorized থাকে, আগে logout করো
+                cur_state = await green_get_state()
+                if cur_state == "authorized":
+                    logger.info("📱 WA already authorized — logging out before pairing")
+                    try:
+                        await green_logout()
+                        await asyncio.sleep(3)  # logout settle হওয়ার জন্য অপেক্ষা
+                    except Exception as le:
+                        logger.warning(f"Pre-pairing logout error: {le}")
+
                 code = await get_wa_pairing_code(phone, uid)
                 clean_code = re.sub(r"[^A-Z0-9]", "", code.upper())
                 formatted = (clean_code[:4] + "-" + clean_code[4:8]) if len(clean_code) >= 8 else code
@@ -3083,9 +2712,10 @@ def main():
     # Private text handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_text))
 
-    # Start scheduled task
+    # Start scheduled tasks
     async def post_init(application):
         asyncio.create_task(scheduled_membership_check(application))
+        asyncio.create_task(green_api_monitor(application))
 
     app.post_init = post_init
 
