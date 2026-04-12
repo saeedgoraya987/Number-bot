@@ -667,27 +667,88 @@ async def monitor_wa_connection(uid: str, context):
                     pass
             break
 
+# Per-user lock — একসাথে একটাই WA page navigation হবে
+_wa_check_locks: dict = {}
+
 async def check_wa_number(phone: str, user_id: str):
-    """Check if number has WhatsApp"""
-    uid = str(user_id)
-    sess = wa_sessions.get(uid, {})
+    """
+    Existing connected WA Web page navigate করে number check।
+    New tab খোলা হয় না → session reload নেই → অনেক দ্রুত (~5-8s/number)।
+    asyncio.Lock দিয়ে sequential access নিশ্চিত করা হয়েছে।
+    """
+    uid    = str(user_id)
+    sess   = wa_sessions.get(uid, {})
     if not sess.get("connected") or not sess.get("page"):
         return None
-    page = sess["page"]
+
+    page   = sess["page"]
     digits = re.sub(r"\D", "", phone)
-    try:
-        result = await page.evaluate(f"""async () => {{
-            try {{
-                const resp = await fetch('https://wa.me/{digits}', {{
-                    method: 'HEAD', mode: 'no-cors',
-                    signal: AbortSignal.timeout(5000)
-                }});
-                return resp.status !== 404;
-            }} catch(e) {{ return null; }}
-        }}""")
-        return result
-    except:
-        return None
+
+    if uid not in _wa_check_locks:
+        _wa_check_locks[uid] = asyncio.Lock()
+
+    async with _wa_check_locks[uid]:
+        try:
+            # Existing page এ send URL এ navigate — session already loaded
+            await page.goto(
+                f"https://web.whatsapp.com/send?phone={digits}",
+                wait_until="domcontentloaded",
+                timeout=20000
+            )
+
+            # Chat input অথবা error popup — max 10 সেকেন্ড wait
+            try:
+                await page.wait_for_selector(
+                    'footer [contenteditable], '
+                    '[data-testid="conversation-compose-box-input"], '
+                    '[data-testid="compose-box-input"], '
+                    '[data-testid="popup-contents"], '
+                    '[role="alertdialog"], '
+                    'div[role="dialog"]',
+                    timeout=10000
+                )
+            except:
+                await asyncio.sleep(3)
+
+            result = await page.evaluate("""() => {
+                const ERROR_WORDS = [
+                    'invalid', 'not on whatsapp', 'unable',
+                    'phone number shared', 'not registered',
+                ];
+                // Error popup → NOT on WhatsApp
+                const dialogs = document.querySelectorAll(
+                    '[data-testid="popup-contents"], div[role="dialog"], [role="alertdialog"]'
+                );
+                for (const d of dialogs) {
+                    const t = (d.innerText || '').toLowerCase();
+                    if (ERROR_WORDS.some(w => t.includes(w))) return false;
+                }
+                // Chat compose box → IS on WhatsApp
+                const CHAT_SELS = [
+                    'footer [contenteditable]',
+                    '[data-testid="conversation-compose-box-input"]',
+                    '[data-testid="compose-box-input"]',
+                    '[contenteditable="true"][data-tab]',
+                    'div[title][contenteditable="true"]',
+                    '[role="textbox"]',
+                ];
+                for (const s of CHAT_SELS) {
+                    if (document.querySelector(s)) return true;
+                }
+                // Invalid number হলে WA main page এ redirect করে
+                if (window.location.pathname === '/' ||
+                    window.location.href === 'https://web.whatsapp.com/') {
+                    return false;
+                }
+                return null;
+            }""")
+
+            logger.info(f"📱 WA check +{digits}: {result}")
+            return result
+
+        except Exception as e:
+            logger.warning(f"check_wa_number error +{digits}: {e}")
+            return None
 
 
 
@@ -1135,7 +1196,13 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = {}
             for n in nums:
                 res[n] = await check_wa_number(n, uid)
-                await asyncio.sleep(0.5)
+            # সব check শেষে main WA Web এ ফিরে যাও
+            try:
+                p = wa_sessions.get(uid, {}).get("page")
+                if p:
+                    await p.goto("https://web.whatsapp.com/", wait_until="domcontentloaded", timeout=15000)
+            except:
+                pass
             updated = "\n".join(
                 f"{i+1}. `+{n}`" + (" 📱" if res.get(n) is True else (" ❌" if res.get(n) is False else " ⬜"))
                 for i, n in enumerate(nums)
@@ -1213,7 +1280,13 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = {}
             for n in nums:
                 res[n] = await check_wa_number(n, uid)
-                await asyncio.sleep(0.5)
+            # সব check শেষে main WA Web এ ফিরে যাও
+            try:
+                p = wa_sessions.get(uid, {}).get("page")
+                if p:
+                    await p.goto("https://web.whatsapp.com/", wait_until="domcontentloaded", timeout=15000)
+            except:
+                pass
             updated = "\n".join(
                 f"{i+1}. `+{n}`" + (" 📱" if res.get(n) is True else (" ❌" if res.get(n) is False else " ⬜"))
                 for i, n in enumerate(nums)
