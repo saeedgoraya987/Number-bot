@@ -753,61 +753,42 @@ async def monitor_wa_connection(uid: str, context):
         logger.info(f"⏰ WA monitor timeout for uid={uid}")
         return
 
-    # ── Phase 2: Connected থাকা অবস্থায় logout detect করো ──
+    # ── Phase 2: Logout detect — main page navigate করা হয় না ──
+    # check_wa_number নতুন tab use করে, তাই main page সবসময় root এ থাকে
     logger.info(f"🔍 WA logout monitor started for uid={uid}")
     logout_fail_count = 0
 
     while True:
-        await asyncio.sleep(45)  # প্রতি ৪৫ সেকেন্ডে check
+        await asyncio.sleep(60)
 
         sess = wa_sessions.get(uid, {})
         page = sess.get("page")
 
         if not page or not sess.get("connected"):
-            logger.info(f"🛑 WA logout monitor stopped (session cleared) for uid={uid}")
+            logger.info(f"🛑 WA logout monitor stopped for uid={uid}")
             break
 
-        # number check task চলছে? তাহলে skip — page অন্য URL এ আছে
-        running_task = wa_check_tasks.get(uid)
-        if running_task and not running_task.done():
-            logger.info(f"⏭️ WA logout check skipped (number check running) uid={uid}")
-            logout_fail_count = 0
-            continue
-
-        # task সবে শেষ হয়েছে? ৬০s cooldown দাও — page এখনো load হচ্ছে হতে পারে
-        last_done = wa_last_check_done.get(uid, 0)
-        if time.time() - last_done < 60:
-            logger.info(f"⏭️ WA logout check skipped (cooldown after check) uid={uid}")
-            logout_fail_count = 0
-            continue
-
-        if uid not in _wa_check_locks:
-            _wa_check_locks[uid] = asyncio.Lock()
-
+        # Main page এর current state check — navigate করা হয় না
         try:
-            async with _wa_check_locks[uid]:
-                await page.goto(
-                    "https://web.whatsapp.com/",
-                    wait_until="domcontentloaded",
-                    timeout=15000
-                )
-                await asyncio.sleep(8)  # page পুরো load হতে দাও
-                still_connected = await is_wa_connected(page)
+            body = await page.inner_text("body")
+            logout_kw = [
+                "logged out", "phone disconnected", "session ended",
+                "device removed", "use whatsapp on your phone",
+                "open whatsapp on your phone", "keep your phone connected"
+            ]
+            is_logged_out = any(k in body.lower() for k in logout_kw)
+
+            if is_logged_out:
+                logout_fail_count += 1
+                logger.warning(f"⚠️ Logout keyword, uid={uid}, fail={logout_fail_count}")
+            else:
+                logout_fail_count = 0
         except Exception as e:
-            logger.warning(f"WA logout monitor check error uid={uid}: {e}")
-            still_connected = True  # error হলে logout ধরবো না
-
-        if still_connected:
+            logger.warning(f"WA logout check error uid={uid}: {e}")
             logout_fail_count = 0
-            logger.info(f"✅ WA still connected: uid={uid}")
-            continue
 
-        logout_fail_count += 1
-        logger.warning(f"⚠️ WA possibly logged out, uid={uid}, fail={logout_fail_count}")
-
-        # ৩ বার consecutive fail = logout confirm
-        # (বেশি থ্রেশহোল্ড = false positive কমে, real logout ধরতে ~3 মিনিট লাগে)
-        if logout_fail_count >= 3:
+        # ১০ বার consecutive = logout confirm
+        if logout_fail_count >= 10:
             wa_sessions[uid]["connected"] = False
             logger.info(f"🔴 WA logged out confirmed: uid={uid}")
             try:
@@ -844,130 +825,90 @@ def cancel_wa_check(uid: str):
 
 async def check_wa_number(phone: str, user_id: str):
     """
-    Existing connected WA Web page navigate করে number check।
-    New tab খোলা হয় না → session reload নেই → অনেক দ্রুত (~5-8s/number)।
-    asyncio.Lock দিয়ে sequential access নিশ্চিত করা হয়েছে।
+    নতুন browser tab এ number check করে — main page কখনো touch করে না।
+    তাই logout monitor এর সাথে কোনো conflict নেই।
     """
-    uid    = str(user_id)
-    sess   = wa_sessions.get(uid, {})
-    if not sess.get("connected") or not sess.get("page"):
+    uid     = str(user_id)
+    sess    = wa_sessions.get(uid, {})
+    if not sess.get("connected") or not sess.get("browser"):
         return None
 
-    page   = sess["page"]
-    digits = re.sub(r"\D", "", phone)
+    browser = sess["browser"]
+    digits  = re.sub(r"\D", "", phone)
 
-    if uid not in _wa_check_locks:
-        _wa_check_locks[uid] = asyncio.Lock()
-
-    async with _wa_check_locks[uid]:
-        try:
-            # Existing page এ send URL এ navigate — session already loaded
-            await page.goto(
-                f"https://web.whatsapp.com/send?phone={digits}",
-                wait_until="domcontentloaded",
-                timeout=20000
+    ctx  = None
+    tab  = None
+    try:
+        # নতুন browser context + tab খোলো — main page touch করা হয় না
+        ctx = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
             )
+        )
+        tab = await ctx.new_page()
 
-            # Step 1: Footer compose box অথবা error popup — max 12 সেকেন্ড wait
-            try:
-                await page.wait_for_selector(
-                    'footer [contenteditable], '
-                    '[data-testid="conversation-compose-box-input"], '
-                    '[data-testid="compose-box-input"], '
-                    '[data-testid="popup-contents"], '
-                    '[role="alertdialog"], '
-                    'div[role="dialog"]',
-                    timeout=12000
-                )
-            except:
-                await asyncio.sleep(4)
+        await tab.goto(
+            f"https://web.whatsapp.com/send?phone={digits}",
+            wait_until="domcontentloaded",
+            timeout=20000
+        )
 
-            # Step 2: Error popup আসার জন্য extra 2s wait
-            # (number invalid হলে compose box আগে দেখা যায়, তারপর popup আসে)
-            await asyncio.sleep(2)
+        try:
+            await tab.wait_for_selector(
+                'footer [contenteditable], '
+                '[data-testid="conversation-compose-box-input"], '
+                '[data-testid="popup-contents"], '
+                '[role="alertdialog"]',
+                timeout=12000
+            )
+        except:
+            await asyncio.sleep(4)
 
-            result = await page.evaluate("""() => {
-                // ── Login/Pairing screen detect ──
-                const LOGIN_SELS = [
-                    '[data-testid="link-device-phone-num-code"]',
-                    '[data-testid="link-device-phone-num-button"]',
-                    '[data-testid="link-with-phone-number"]',
-                    'canvas[aria-label]',
-                    '[data-testid="qrcode"]',
-                ];
-                const isLoginPage = LOGIN_SELS.some(s => !!document.querySelector(s));
-                if (isLoginPage) return 'LOGGED_OUT';
+        await asyncio.sleep(2)
 
-                // ── Error popup সবার আগে check — "not on WA" হলে এটাই primary signal ──
-                const ERROR_WORDS = [
-                    'invalid', 'not on whatsapp', 'unable',
-                    'phone number shared', 'not registered',
-                    'no account', "isn't on whatsapp", 'check the phone number',
-                ];
-                const dialogs = document.querySelectorAll(
-                    '[data-testid="popup-contents"], div[role="dialog"], [role="alertdialog"]'
-                );
-                for (const d of dialogs) {
-                    if (!d.offsetParent) continue; // hidden element skip
-                    const t = (d.innerText || '').toLowerCase();
-                    if (ERROR_WORDS.some(w => t.includes(w))) return false;
-                    // Dialog আছে কিন্তু error word নেই — তাও not-on-WA হতে পারে
-                    if (t.length > 5) return false;
-                }
+        result = await tab.evaluate("""() => {
+            const ERROR_WORDS = [
+                'invalid', 'not on whatsapp', 'unable',
+                'phone number shared', 'not registered',
+                'no account', "isn't on whatsapp", 'check the phone number',
+            ];
+            const dialogs = document.querySelectorAll(
+                '[data-testid="popup-contents"], div[role="dialog"], [role="alertdialog"]'
+            );
+            for (const d of dialogs) {
+                if (!d.offsetParent) continue;
+                const t = (d.innerText || '').toLowerCase();
+                if (ERROR_WORDS.some(w => t.includes(w))) return false;
+                if (t.length > 5) return false;
+            }
+            const COMPOSE = [
+                'footer [contenteditable="true"]',
+                '[data-testid="conversation-compose-box-input"]',
+                '[data-testid="compose-box-input"]',
+            ];
+            for (const s of COMPOSE) {
+                const el = document.querySelector(s);
+                if (el && el.offsetParent !== null) return true;
+            }
+            if (window.location.pathname === '/') return false;
+            return null;
+        }""")
 
-                // ── Strict compose box check — footer এর ভেতরে থাকতে হবে ──
-                // [role="textbox"] বা search bar false positive দেয়, তাই বাদ
-                const STRICT_CHAT_SELS = [
-                    'footer [contenteditable="true"]',
-                    '[data-testid="conversation-compose-box-input"]',
-                    '[data-testid="compose-box-input"]',
-                ];
-                for (const s of STRICT_CHAT_SELS) {
-                    const el = document.querySelector(s);
-                    if (el && el.offsetParent !== null) return true; // visible element
-                }
+        logger.info(f"📱 WA check +{digits}: {result}")
+        return result
 
-                // ── URL check — invalid হলে root এ redirect ──
-                if (window.location.pathname === '/' ||
-                    window.location.href === 'https://web.whatsapp.com/') {
-                    return false;
-                }
-
-                // ── send?phone= URL এ আছি কিন্তু compose নেই = not on WA ──
-                if (window.location.href.includes('/send?phone=')) {
-                    return null; // uncertain — timeout হয়েছে
-                }
-
-                return null;
-            }""")
-
-            # ── বারবার retry করে LOGGED_OUT confirm ──
-            if result == 'LOGGED_OUT':
-                # Page navigation এর সময় WA momentarily login screen দেখাতে পারে।
-                # check_wa_number এর ভেতর session কখনো False করা হবে না —
-                # শুধু None return করো, session intact থাকবে।
-                logger.warning(f"⚠️ WA login screen detected during check for +{digits} (uid={uid}), skipping number")
-                return None
-
-            logger.info(f"📱 WA check +{digits}: {result}")
-
-            # ✅ Check শেষে root এ navigate করে রাখো।
-            # কারণ: logout monitor is_wa_connected() দিয়ে check করে — /send?phone= URL এ
-            # থাকলে [data-testid="side"] পাবে না, ভুলভাবে disconnected ধরবে।
-            try:
-                await page.goto(
-                    "https://web.whatsapp.com/",
-                    wait_until="domcontentloaded",
-                    timeout=10000
-                )
-            except:
-                pass
-
-            return result
-
-        except Exception as e:
-            logger.warning(f"check_wa_number error +{digits}: {e}")
-            return None
+    except Exception as e:
+        logger.warning(f"check_wa_number error +{digits}: {e}")
+        return None
+    finally:
+        # Tab ও context বন্ধ করো
+        try:
+            if ctx:
+                await ctx.close()
+        except:
+            pass
 
 
 
