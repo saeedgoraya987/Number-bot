@@ -100,6 +100,7 @@ earnings       = load_json(EARNINGS_FILE, {})
 withdrawals    = load_json(WITHDRAW_FILE, [])
 country_prices = load_json(COUNTRY_PRICES_FILE, {})
 wa_sessions    = {}  # { user_id: { browser, page, connected } }
+wa_check_tasks = {}  # { user_id: asyncio.Task } — চলতি WA check task
 
 countries = load_json(COUNTRIES_FILE, {
     "880": {"name": "Bangladesh", "flag": "🇧🇩"},
@@ -670,6 +671,24 @@ async def monitor_wa_connection(uid: str, context):
 # Per-user lock — একসাথে একটাই WA page navigation হবে
 _wa_check_locks: dict = {}
 
+def cancel_wa_check(uid: str):
+    """আগের WA check task cancel করো — নতুন batch শুরুর আগে call করো"""
+    uid = str(uid)
+    task = wa_check_tasks.get(uid)
+    if task and not task.done():
+        task.cancel()
+        logger.info(f"🛑 WA check task cancelled for uid={uid}")
+    wa_check_tasks.pop(uid, None)
+    # Lock reset করো — cancel হওয়া task lock ধরে থাকলে নতুন task hang করবে
+    if uid in _wa_check_locks:
+        lk = _wa_check_locks[uid]
+        if lk.locked():
+            try:
+                lk.release()
+            except RuntimeError:
+                pass
+        _wa_check_locks[uid] = asyncio.Lock()  # fresh lock
+
 async def check_wa_number(phone: str, user_id: str):
     """
     Existing connected WA Web page navigate করে number check।
@@ -696,7 +715,7 @@ async def check_wa_number(phone: str, user_id: str):
                 timeout=20000
             )
 
-            # Chat input অথবা error popup — max 10 সেকেন্ড wait
+            # Step 1: Footer compose box অথবা error popup — max 12 সেকেন্ড wait
             try:
                 await page.wait_for_selector(
                     'footer [contenteditable], '
@@ -705,10 +724,14 @@ async def check_wa_number(phone: str, user_id: str):
                     '[data-testid="popup-contents"], '
                     '[role="alertdialog"], '
                     'div[role="dialog"]',
-                    timeout=10000
+                    timeout=12000
                 )
             except:
-                await asyncio.sleep(3)
+                await asyncio.sleep(4)
+
+            # Step 2: Error popup আসার জন্য extra 2s wait
+            # (number invalid হলে compose box আগে দেখা যায়, তারপর popup আসে)
+            await asyncio.sleep(2)
 
             result = await page.evaluate("""() => {
                 // ── Login/Pairing screen detect ──
@@ -722,35 +745,46 @@ async def check_wa_number(phone: str, user_id: str):
                 const isLoginPage = LOGIN_SELS.some(s => !!document.querySelector(s));
                 if (isLoginPage) return 'LOGGED_OUT';
 
+                // ── Error popup সবার আগে check — "not on WA" হলে এটাই primary signal ──
                 const ERROR_WORDS = [
                     'invalid', 'not on whatsapp', 'unable',
                     'phone number shared', 'not registered',
+                    'no account', "isn't on whatsapp", 'check the phone number',
                 ];
-                // Error popup → NOT on WhatsApp
                 const dialogs = document.querySelectorAll(
                     '[data-testid="popup-contents"], div[role="dialog"], [role="alertdialog"]'
                 );
                 for (const d of dialogs) {
+                    if (!d.offsetParent) continue; // hidden element skip
                     const t = (d.innerText || '').toLowerCase();
                     if (ERROR_WORDS.some(w => t.includes(w))) return false;
+                    // Dialog আছে কিন্তু error word নেই — তাও not-on-WA হতে পারে
+                    if (t.length > 5) return false;
                 }
-                // Chat compose box → IS on WhatsApp
-                const CHAT_SELS = [
-                    'footer [contenteditable]',
+
+                // ── Strict compose box check — footer এর ভেতরে থাকতে হবে ──
+                // [role="textbox"] বা search bar false positive দেয়, তাই বাদ
+                const STRICT_CHAT_SELS = [
+                    'footer [contenteditable="true"]',
                     '[data-testid="conversation-compose-box-input"]',
                     '[data-testid="compose-box-input"]',
-                    '[contenteditable="true"][data-tab]',
-                    'div[title][contenteditable="true"]',
-                    '[role="textbox"]',
                 ];
-                for (const s of CHAT_SELS) {
-                    if (document.querySelector(s)) return true;
+                for (const s of STRICT_CHAT_SELS) {
+                    const el = document.querySelector(s);
+                    if (el && el.offsetParent !== null) return true; // visible element
                 }
-                // Invalid number হলে WA main page এ redirect করে
+
+                // ── URL check — invalid হলে root এ redirect ──
                 if (window.location.pathname === '/' ||
                     window.location.href === 'https://web.whatsapp.com/') {
                     return false;
                 }
+
+                // ── send?phone= URL এ আছি কিন্তু compose নেই = not on WA ──
+                if (window.location.href.includes('/send?phone=')) {
+                    return null; // uncertain — timeout হয়েছে
+                }
+
                 return null;
             }""")
 
@@ -785,11 +819,9 @@ async def check_wa_number(phone: str, user_id: str):
                     logger.warning(f"⚠️ WA session confirmed logged out for uid={uid}")
                     return None
                 elif recheck == 'UNKNOWN':
-                    # UNKNOWN মানে page এখনও load হচ্ছে, connected ধরে রাখো
                     logger.info(f"⚠️ WA recheck UNKNOWN, treating as connected uid={uid}")
                     return None
                 else:
-                    # CONNECTED — false alarm ছিল
                     result = True
 
             logger.info(f"📱 WA check +{digits}: {result}")
@@ -798,6 +830,7 @@ async def check_wa_number(phone: str, user_id: str):
         except Exception as e:
             logger.warning(f"check_wa_number error +{digits}: {e}")
             return None
+
 
 
 
@@ -1268,7 +1301,8 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(final_buttons)
                 )
             except: pass
-        asyncio.create_task(do_wa_check())
+        cancel_wa_check(uid)
+        wa_check_tasks[uid] = asyncio.create_task(do_wa_check())
 
 async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1358,7 +1392,8 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(final_buttons_new)
                 )
             except: pass
-        asyncio.create_task(do_wa_check_new())
+        cancel_wa_check(uid)
+        wa_check_tasks[uid] = asyncio.create_task(do_wa_check_new())
 
 async def cb_back_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
