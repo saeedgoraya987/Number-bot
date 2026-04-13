@@ -1,2 +1,1 @@
-bot: python bot.py
-baileys: node baileys_server.js
+web: bash start.sh
