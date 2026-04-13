@@ -891,11 +891,7 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
         [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
     ]
-    if wa_connected:
-        # শুধু owner disconnect করতে পারবে
-        buttons.append([InlineKeyboardButton("🔴 Disconnect WhatsApp", callback_data="wa_disconnect")])
-    else:
-        # কেউ connect না থাকলে Connect বাটন দেখাও
+    if not wa_connected:
         buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
 
     await query.edit_message_text(make_msg(nums_text), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
@@ -978,11 +974,7 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
         [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
     ]
-    if wa_connected:
-        # শুধু owner disconnect করতে পারবে
-        buttons.append([InlineKeyboardButton("🔴 Disconnect WhatsApp", callback_data="wa_disconnect")])
-    else:
-        # কেউ connect না থাকলে Connect বাটন দেখাও
+    if not wa_connected:
         buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
 
     await query.edit_message_text(make_msg_new(nums_text), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
