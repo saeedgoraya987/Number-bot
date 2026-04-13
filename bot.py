@@ -1249,14 +1249,13 @@ async def cb_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid  = str(update.effective_user.id)
 
-    # যদি ইতিমধ্যে connected থাকে
+    # যদি ইতিমধ্যে connected থাকে, logout বাটন দেখাও
     if _green_state.get("authorized"):
         owner_uid = str(_green_owner.get("uid") or "")
-        if owner_uid == uid:
-            # নিজেই owner — disconnect অপশন দেখাও
+        if owner_uid == uid or wa_sessions.get(uid, {}).get("connected"):
             await query.edit_message_text(
                 "✅ *WhatsApp Already Connected!*\n\n"
-                "🟢 তোমার WhatsApp এখন active আছে।\n"
+                "🟢 WhatsApp এখন active আছে।\n"
                 "Disconnect করতে নিচের বাটন চাপো:",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
@@ -1264,13 +1263,7 @@ async def cb_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     [InlineKeyboardButton("📊 Check Status", callback_data="wa_status")],
                 ])
             )
-        else:
-            # অন্য ইউজার connect করে রেখেছে — allow করো না
-            await query.answer(
-                "⛔ WhatsApp এখন অন্য ইউজার ব্যবহার করছে। পরে চেষ্টা করো।",
-                show_alert=True
-            )
-        return
+            return
 
     sess = get_session(uid)
     sess["state"] = "wa_waiting_number"
@@ -1309,15 +1302,8 @@ async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    uid = str(update.effective_user.id)
-
-    # শুধু owner disconnect করতে পারবে
-    owner_uid = str(_green_owner.get("uid") or "")
-    if owner_uid and owner_uid != uid and not (get_session(uid).get("is_admin") or is_admin(uid)):
-        await query.answer("⛔ শুধু WA owner disconnect করতে পারবে।", show_alert=True)
-        return
-
     await query.answer("⏳ Disconnecting...")
+    uid = str(update.effective_user.id)
 
     # Green API থেকে logout করো
     try:
