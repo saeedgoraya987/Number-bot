@@ -360,18 +360,6 @@ async def green_api_monitor(app):
             was_auth = _green_state.get("authorized", False)
             is_auth  = (state == "authorized")
 
-            # ── Keepalive: authorized থাকলে session জীবিত রাখো ──
-            if is_auth:
-                try:
-                    loop = asyncio.get_event_loop()
-                    await loop.run_in_executor(
-                        None,
-                        lambda: green_request("GET", "getStateInstance")
-                    )
-                    logger.debug("🟢 Green API keepalive ping sent")
-                except Exception as ke:
-                    logger.warning(f"Keepalive ping error: {ke}")
-
             if was_auth and not is_auth:
                 # ── Logout detected ──
                 _green_state["authorized"] = False
@@ -908,8 +896,7 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
 
-    # শুধু যে ইউজার WA connect করেছে সে-ই WA check পাবে
-    wa_connected = _green_state.get("authorized", False) and str(_green_owner.get("uid")) == uid
+    wa_connected = _green_state.get("authorized", False)
     nums_text = "\n".join(
         f"{i+1}. `+{n}`" + (" ⏳" if wa_connected else "")
         for i, n in enumerate(nums)
@@ -931,11 +918,7 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
         [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
     ]
-    if wa_connected:
-        # শুধু owner disconnect করতে পারবে
-        buttons.append([InlineKeyboardButton("🔴 Disconnect WhatsApp", callback_data="wa_disconnect")])
-    elif not _green_state.get("authorized", False):
-        # কেউ connect না থাকলে Connect বাটন দেখাও
+    if not wa_connected:
         buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
 
     await query.edit_message_text(make_msg(nums_text), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
@@ -994,8 +977,7 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     country = countries.get(cc, {"flag": "🌍", "name": cc})
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
-    # শুধু যে ইউজার WA connect করেছে সে-ই WA check পাবে
-    wa_connected = _green_state.get("authorized", False) and str(_green_owner.get("uid")) == uid
+    wa_connected = _green_state.get("authorized", False)
 
     nums_text = "\n".join(
         f"{i+1}. `+{n}`" + (" ⏳" if wa_connected else "")
@@ -1018,11 +1000,7 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"newnum:{svc_id}:{cc}")],
         [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
     ]
-    if wa_connected:
-        # শুধু owner disconnect করতে পারবে
-        buttons.append([InlineKeyboardButton("🔴 Disconnect WhatsApp", callback_data="wa_disconnect")])
-    elif not _green_state.get("authorized", False):
-        # কেউ connect না থাকলে Connect বাটন দেখাও
+    if not wa_connected:
         buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
 
     await query.edit_message_text(make_msg_new(nums_text), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
