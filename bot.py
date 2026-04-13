@@ -360,6 +360,18 @@ async def green_api_monitor(app):
             was_auth = _green_state.get("authorized", False)
             is_auth  = (state == "authorized")
 
+            # ── Keepalive: authorized থাকলে session জীবিত রাখো ──
+            if is_auth:
+                try:
+                    loop = asyncio.get_event_loop()
+                    await loop.run_in_executor(
+                        None,
+                        lambda: green_request("GET", "getStateInstance")
+                    )
+                    logger.debug("🟢 Green API keepalive ping sent")
+                except Exception as ke:
+                    logger.warning(f"Keepalive ping error: {ke}")
+
             if was_auth and not is_auth:
                 # ── Logout detected ──
                 _green_state["authorized"] = False
@@ -399,7 +411,6 @@ async def green_api_monitor(app):
 async def get_wa_pairing_code(phone: str, user_id: str) -> str:
     """
     Green API phone-number pairing code।
-    State check করে — already authorized হলে logout করে তারপর pairing।
     Global lock: একসাথে একজনই pairing করতে পারবে।
     """
     global _wa_pair_lock
@@ -410,43 +421,22 @@ async def get_wa_pairing_code(phone: str, user_id: str) -> str:
     logger.info(f"📱 Green API pairing for: +{digits}")
 
     async with _wa_pair_lock:
-        loop = asyncio.get_event_loop()
-
-        # ── State check ──
-        current_state = await green_get_state()
-        logger.info(f"📱 Current state before pairing: {current_state}")
-
-        if current_state == "authorized":
-            # Already authorized — logout করো তারপর pairing
-            logger.info("📱 Already authorized, logging out first...")
-            await loop.run_in_executor(
-                None,
-                lambda: green_request("GET", "logout")
-            )
-            # Logout এর পর কিছুটা wait করো
-            await asyncio.sleep(3)
-            new_state = await green_get_state()
-            logger.info(f"📱 State after logout: {new_state}")
-            if new_state == "authorized":
-                raise Exception("Logout হয়নি। কিছুক্ষণ পর আবার try করো।")
-
-        # ── Pairing code নাও ──
+        loop   = asyncio.get_event_loop()
         result = await loop.run_in_executor(
             None,
             lambda: green_request("POST", "getAuthorizationCode", {"phoneNumber": int(digits)})
         )
         logger.info(f"Green API pairing result: {result}")
-
         if result.get("status") is True and result.get("code"):
             code  = str(result["code"])
             clean = re.sub(r"[^A-Z0-9]", "", code.upper())
             if len(clean) >= 8:
                 return f"{clean[:4]}-{clean[4:8]}"
             return code
-
-        # Error message সুন্দর করে দেখাও
-        err = result.get("message") or result.get("error") or ""
-        raise Exception(err or "Pairing code পাওয়া যায়নি। কিছুক্ষণ পর আবার try করো।")
+        raise Exception(
+            result.get("message") or
+            "Pairing code পাওয়া যায়নি। কিছুক্ষণ পর আবার try করো।"
+        )
 
 async def monitor_wa_connection(uid: str, context):
     """
@@ -466,10 +456,16 @@ async def monitor_wa_connection(uid: str, context):
                 logger.info(f"✅ WA connected: uid={uid}")
                 try:
                     await context.bot.send_message(
-                        uid,
+                        int(uid),
                         "✅ *WhatsApp Connected!*\n\n"
-                        "এখন numbers assign হলে WA check দেখাবে।",
-                        parse_mode="Markdown"
+                        "🟢 তোমার WhatsApp সফলভাবে connect হয়েছে।\n"
+                        "এখন numbers assign হলে WA check দেখাবে।\n\n"
+                        "Disconnect করতে নিচের বাটন চাপো:",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔴 Logout / Disconnect", callback_data="wa_disconnect")],
+                            [InlineKeyboardButton("📊 Check Status", callback_data="wa_status")],
+                        ])
                     )
                 except:
                     pass
@@ -912,7 +908,8 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
 
-    wa_connected = _green_state.get("authorized", False)
+    # শুধু যে ইউজার WA connect করেছে সে-ই WA check পাবে
+    wa_connected = _green_state.get("authorized", False) and str(_green_owner.get("uid")) == uid
     nums_text = "\n".join(
         f"{i+1}. `+{n}`" + (" ⏳" if wa_connected else "")
         for i, n in enumerate(nums)
@@ -935,8 +932,10 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
     ]
     if wa_connected:
+        # শুধু owner disconnect করতে পারবে
         buttons.append([InlineKeyboardButton("🔴 Disconnect WhatsApp", callback_data="wa_disconnect")])
-    else:
+    elif not _green_state.get("authorized", False):
+        # কেউ connect না থাকলে Connect বাটন দেখাও
         buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
 
     await query.edit_message_text(make_msg(nums_text), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
@@ -995,7 +994,8 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     country = countries.get(cc, {"flag": "🌍", "name": cc})
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
-    wa_connected = _green_state.get("authorized", False)
+    # শুধু যে ইউজার WA connect করেছে সে-ই WA check পাবে
+    wa_connected = _green_state.get("authorized", False) and str(_green_owner.get("uid")) == uid
 
     nums_text = "\n".join(
         f"{i+1}. `+{n}`" + (" ⏳" if wa_connected else "")
@@ -1019,8 +1019,10 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 Service List", callback_data="back_services")],
     ]
     if wa_connected:
+        # শুধু owner disconnect করতে পারবে
         buttons.append([InlineKeyboardButton("🔴 Disconnect WhatsApp", callback_data="wa_disconnect")])
-    else:
+    elif not _green_state.get("authorized", False):
+        # কেউ connect না থাকলে Connect বাটন দেখাও
         buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
 
     await query.edit_message_text(make_msg_new(nums_text), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
@@ -1246,6 +1248,30 @@ async def cb_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     uid  = str(update.effective_user.id)
+
+    # যদি ইতিমধ্যে connected থাকে
+    if _green_state.get("authorized"):
+        owner_uid = str(_green_owner.get("uid") or "")
+        if owner_uid == uid:
+            # নিজেই owner — disconnect অপশন দেখাও
+            await query.edit_message_text(
+                "✅ *WhatsApp Already Connected!*\n\n"
+                "🟢 তোমার WhatsApp এখন active আছে।\n"
+                "Disconnect করতে নিচের বাটন চাপো:",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔴 Logout / Disconnect", callback_data="wa_disconnect")],
+                    [InlineKeyboardButton("📊 Check Status", callback_data="wa_status")],
+                ])
+            )
+        else:
+            # অন্য ইউজার connect করে রেখেছে — allow করো না
+            await query.answer(
+                "⛔ WhatsApp এখন অন্য ইউজার ব্যবহার করছে। পরে চেষ্টা করো।",
+                show_alert=True
+            )
+        return
+
     sess = get_session(uid)
     sess["state"] = "wa_waiting_number"
     await context.bot.send_message(
@@ -1283,30 +1309,39 @@ async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cb_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("⏳ Disconnecting...")
     uid = str(update.effective_user.id)
 
-    # Green API logout
-    loop = asyncio.get_event_loop()
-    try:
-        await loop.run_in_executor(None, lambda: green_request("GET", "logout"))
-        logger.info(f"✅ WA logout via Green API: {uid}")
-    except Exception as e:
-        logger.error(f"Logout error: {e}")
+    # শুধু owner disconnect করতে পারবে
+    owner_uid = str(_green_owner.get("uid") or "")
+    if owner_uid and owner_uid != uid and not (get_session(uid).get("is_admin") or is_admin(uid)):
+        await query.answer("⛔ শুধু WA owner disconnect করতে পারবে।", show_alert=True)
+        return
 
-    # Local state clear
+    await query.answer("⏳ Disconnecting...")
+
+    # Green API থেকে logout করো
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: green_request("GET", "logout"))
+        logger.info(f"✅ Green API logout called for uid={uid}")
+    except Exception as e:
+        logger.error(f"Green API logout error: {e}")
+
+    # Session ও state clear করো
     wa_sessions.pop(uid, None)
     _green_state["authorized"] = False
-    if str(_green_owner.get("uid")) == uid:
+    if _green_owner.get("uid") == uid:
         _green_owner["uid"] = None
         save_green_owner()
 
     await query.edit_message_text(
-        "🔴 *WhatsApp Disconnected.*\n\nআবার connect করতে নিচের button চাপো।",
+        "🔴 *WhatsApp Disconnected!*\n\n"
+        "তোমার WhatsApp সফলভাবে logout হয়েছে।\n"
+        "আবার connect করতে নিচের বাটন চাপো:",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")
-        ]])
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")],
+        ])
     )
 
 # ─── Temp Mail ───
