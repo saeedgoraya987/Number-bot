@@ -2585,30 +2585,8 @@ async def scheduled_membership_check(app):
         save_users()
         logger.info(f"✅ [Scheduled] {blocked} users blocked.")
 
-# ─── Baileys Auto-Start ───
-def start_baileys_server():
-    """Bot start হলে Baileys server automatically চালু হবে"""
-    try:
-        logger.info("🟢 Baileys server starting...")
-        process = subprocess.Popen(
-            ["node", "baileys_server.js"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True
-        )
-        for line in process.stdout:
-            logger.info(f"[Baileys] {line.strip()}")
-    except Exception as e:
-        logger.error(f"Baileys start error: {e}")
-
 # ─── Main ───
 def main():
-    # ── Baileys server background এ চালু করো ──
-    baileys_thread = threading.Thread(target=start_baileys_server, daemon=True)
-    baileys_thread.start()
-    logger.info("⏳ Baileys server starting, 5 সেকেন্ড অপেক্ষা...")
-    time.sleep(5)
-
     app = Application.builder().token(BOT_TOKEN).build()
 
     # Commands
