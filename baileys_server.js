@@ -1,6 +1,6 @@
 /**
- * Baileys WhatsApp API Server
- * Fast WA number checker for Earning Hub Bot
+ * Baileys WhatsApp API Server - Multi Session
+ * প্রতিটা user এর আলাদা WhatsApp session
  */
 
 const {
@@ -19,33 +19,42 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const AUTH_DIR = process.env.AUTH_DIR || "./wa_auth";
+const AUTH_BASE = process.env.AUTH_DIR || "./wa_auth";
 
-// ── State ──────────────────────────────────────────────
-let sock = null;
-let isConnected = false;
-let currentQR = null;
-let isReconnecting = false;
+// ── Sessions Store ─────────────────────────────────────
+// { userId: { sock, isConnected, currentQR, isReconnecting } }
+const sessions = {};
 
-// ── Connect ────────────────────────────────────────────
-async function connectWA() {
-  if (isReconnecting) return;
-  isReconnecting = true;
+// ── Connect একটা user এর জন্য ─────────────────────────
+async function connectWA(userId) {
+  if (!sessions[userId]) {
+    sessions[userId] = {
+      sock: null,
+      isConnected: false,
+      currentQR: null,
+      isReconnecting: false,
+    };
+  }
+
+  const session = sessions[userId];
+  if (session.isReconnecting) return;
+  session.isReconnecting = true;
 
   try {
-    if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+    const authDir = `${AUTH_BASE}/${userId}`;
+    if (!fs.existsSync(authDir)) fs.mkdirSync(authDir, { recursive: true });
 
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { state, saveCreds } = await useMultiFileAuthState(authDir);
     const { version } = await fetchLatestBaileysVersion();
 
-    sock = makeWASocket({
+    session.sock = makeWASocket({
       version,
       auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
       },
       logger: pino({ level: "silent" }),
-      printQRInTerminal: true,
+      printQRInTerminal: false,
       browser: ["Ubuntu", "Chrome", "22.04.4"],
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
@@ -54,73 +63,87 @@ async function connectWA() {
       defaultQueryTimeoutMs: 20000,
     });
 
-    sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
+    session.sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
       if (qr) {
-        currentQR = qr;
-        isConnected = false;
-        console.log("📱 QR Code ready — scan করো");
+        session.currentQR = qr;
+        session.isConnected = false;
+        console.log(`📱 [${userId}] QR ready`);
       }
 
       if (connection === "open") {
-        isConnected = true;
-        currentQR = null;
-        isReconnecting = false;
-        console.log("✅ WhatsApp Connected!");
+        session.isConnected = true;
+        session.currentQR = null;
+        session.isReconnecting = false;
+        console.log(`✅ [${userId}] WhatsApp Connected!`);
       }
 
       if (connection === "close") {
-        isConnected = false;
-        isReconnecting = false;
+        session.isConnected = false;
+        session.isReconnecting = false;
         const code = lastDisconnect?.error?.output?.statusCode;
         const loggedOut = code === DisconnectReason.loggedOut || code === 401;
-        console.log(`❌ Disconnected (code: ${code}). LoggedOut: ${loggedOut}`);
+        console.log(`❌ [${userId}] Disconnected (code: ${code})`);
 
         if (!loggedOut) {
-          console.log("🔄 5 সেকেন্ড পর reconnect হবে...");
-          setTimeout(connectWA, 5000);
+          setTimeout(() => connectWA(userId), 5000);
         } else {
-          console.log("🚫 Logged out — auth delete করো এবং restart করো");
-          // Auth clear করে reconnect
+          console.log(`🚫 [${userId}] Logged out — clearing auth`);
           try {
-            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+            const authDir = `${AUTH_BASE}/${userId}`;
+            fs.rmSync(authDir, { recursive: true, force: true });
           } catch {}
-          setTimeout(connectWA, 3000);
+          delete sessions[userId];
         }
       }
     });
 
-    sock.ev.on("creds.update", saveCreds);
+    session.sock.ev.on("creds.update", saveCreds);
   } catch (e) {
-    console.error("connectWA error:", e.message);
-    isReconnecting = false;
-    setTimeout(connectWA, 10000);
+    console.error(`connectWA error [${userId}]:`, e.message);
+    session.isReconnecting = false;
+    setTimeout(() => connectWA(userId), 10000);
   }
 }
-
-connectWA();
 
 // ── Routes ─────────────────────────────────────────────
 
 // Status check
 app.get("/status", (req, res) => {
+  const { userId } = req.query;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  const session = sessions[userId];
   res.json({
-    connected: isConnected,
-    hasQR: !!currentQR,
+    connected: session?.isConnected || false,
+    hasQR: !!(session?.currentQR),
   });
 });
 
-// QR Code (base64 image)
+// Session start
+app.post("/start", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  if (!sessions[userId] || !sessions[userId].sock) {
+    await connectWA(userId);
+  }
+
+  res.json({ started: true });
+});
+
+// QR Code
 app.get("/qr", async (req, res) => {
-  if (isConnected) return res.json({ connected: true });
-  if (!currentQR)
-    return res.json({
-      waiting: true,
-      message: "QR ready হয়নি, কয়েক সেকেন্ড অপেক্ষা করো",
-    });
+  const { userId } = req.query;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  const session = sessions[userId];
+  if (!session) return res.json({ waiting: true, message: "Session শুরু হয়নি" });
+  if (session.isConnected) return res.json({ connected: true });
+  if (!session.currentQR) return res.json({ waiting: true, message: "QR ready হয়নি" });
 
   try {
-    const qrImage = await qrcode.toDataURL(currentQR);
-    res.json({ qr: qrImage, raw: currentQR });
+    const qrImage = await qrcode.toDataURL(session.currentQR);
+    res.json({ qr: qrImage, raw: session.currentQR });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -128,76 +151,83 @@ app.get("/qr", async (req, res) => {
 
 // Pairing Code
 app.post("/pair", async (req, res) => {
-  const { phone } = req.body;
-  if (!phone) return res.status(400).json({ error: "phone required" });
-  if (isConnected) return res.json({ connected: true });
-  if (!sock) return res.status(503).json({ error: "Socket not ready" });
+  const { phone, userId } = req.body;
+  if (!phone || !userId) return res.status(400).json({ error: "phone and userId required" });
+
+  const session = sessions[userId];
+  if (!session) return res.status(503).json({ error: "Session নেই, আগে /start করো" });
+  if (session.isConnected) return res.json({ connected: true });
+  if (!session.sock) return res.status(503).json({ error: "Socket ready নয়" });
 
   try {
     const digits = phone.replace(/\D/g, "");
-    const code = await sock.requestPairingCode(digits);
-    console.log(`🔑 Pairing code for +${digits}: ${code}`);
+    const code = await session.sock.requestPairingCode(digits);
+    console.log(`🔑 [${userId}] Pairing code: ${code}`);
     res.json({ code });
   } catch (e) {
-    console.error("Pair error:", e.message);
+    console.error(`Pair error [${userId}]:`, e.message);
     res.status(500).json({ error: e.message || "Pairing code পাওয়া যায়নি" });
   }
 });
 
-// ── Fast Batch WA Check ──────────────────────────────────
+// WA Check
 app.post("/check", async (req, res) => {
-  if (!isConnected || !sock) {
+  const { numbers, userId } = req.body;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  const session = sessions[userId];
+  if (!session?.isConnected || !session?.sock) {
     return res.status(503).json({ error: "Not connected" });
   }
 
-  const { numbers } = req.body;
   if (!numbers || !Array.isArray(numbers) || numbers.length === 0) {
     return res.status(400).json({ error: "numbers array required" });
   }
 
   const results = {};
-  // Default সব false
   for (const n of numbers) results[n] = false;
 
   try {
     const cleaned = numbers.map((n) => n.replace(/\D/g, ""));
-
-    // Baileys onWhatsApp — সব একসাথে check করে (দ্রুত)
-    const waResults = await sock.onWhatsApp(...cleaned);
+    const waResults = await session.sock.onWhatsApp(...cleaned);
 
     if (Array.isArray(waResults)) {
       for (const r of waResults) {
         const num = r.jid.replace(/@s\.whatsapp\.net$/, "");
         const orig = numbers.find((n) => n.replace(/\D/g, "") === num);
-        if (orig !== undefined) {
-          results[orig] = r.exists === true;
-        }
+        if (orig !== undefined) results[orig] = r.exists === true;
       }
     }
 
     res.json({ results });
   } catch (e) {
-    console.error("Check error:", e.message);
+    console.error(`Check error [${userId}]:`, e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
-// Disconnect / Logout
+// Disconnect
 app.post("/disconnect", async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: "userId required" });
+
+  const session = sessions[userId];
   try {
-    if (sock) {
-      await sock.logout();
-      sock = null;
+    if (session?.sock) {
+      await session.sock.logout();
     }
-    isConnected = false;
-    currentQR = null;
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch {}
+
+  try {
+    const authDir = `${AUTH_BASE}/${userId}`;
+    fs.rmSync(authDir, { recursive: true, force: true });
+  } catch {}
+
+  delete sessions[userId];
+  res.json({ success: true });
 });
 
 // ── Start ──────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`🚀 Baileys API Server চালু হয়েছে — Port: ${PORT}`);
+  console.log(`🚀 Baileys Multi-Session Server — Port: ${PORT}`);
 });
