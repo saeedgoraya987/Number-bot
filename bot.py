@@ -324,119 +324,95 @@ def baileys_request(method: str, path: str, body=None) -> dict:
         logger.error(f"Baileys API error [{path}]: {e}")
         return {}
 
-async def green_get_state() -> str:
-    """authorized / notAuthorized"""
+async def green_get_state(uid: str = None) -> str:
+    """authorized / notAuthorized — per user"""
     loop   = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, lambda: baileys_request("GET", "/status"))
+    path   = f"/status?userId={uid}" if uid else "/status?userId=global"
+    result = await loop.run_in_executor(None, lambda: baileys_request("GET", path))
     if result.get("connected"):
         return "authorized"
     return "notAuthorized"
 
 async def green_api_monitor(app):
     """
-    Background task — Baileys connection পর্যবেক্ষণ।
+    Background task — সব user এর Baileys connection পর্যবেক্ষণ।
     """
     logger.info("🟢 Baileys monitor started")
-
-    try:
-        init_state = await green_get_state()
-        _green_state["authorized"] = (init_state == "authorized")
-        logger.info(f"🟢 Baileys initial state: {init_state}")
-
-        if init_state == "authorized" and _green_owner.get("uid"):
-            owner = str(_green_owner["uid"])
-            wa_sessions[owner] = {"connected": True}
-            logger.info(f"🔄 WA session restored for uid={owner}")
-    except Exception as e:
-        logger.error(f"Baileys initial check error: {e}")
 
     while True:
         await asyncio.sleep(30)
         try:
-            state    = await green_get_state()
-            was_auth = _green_state.get("authorized", False)
-            is_auth  = (state == "authorized")
-
-            if was_auth and not is_auth:
-                _green_state["authorized"] = False
-                owner_uid = _green_owner.get("uid")
-                logger.warning(f"⚠️ Baileys: WhatsApp disconnected! owner={owner_uid}")
-
-                if owner_uid:
-                    wa_sessions.pop(str(owner_uid), None)
-                    _green_owner["uid"] = None
-                    save_green_owner()
-                    try:
-                        await app.bot.send_message(
-                            int(owner_uid),
-                            "⚠️ *WhatsApp Disconnected!*\n\n"
-                            "তোমার WhatsApp থেকে bot disconnect হয়েছে।\n"
-                            "আবার connect করতে নিচের button চাপো।",
-                            parse_mode="Markdown",
-                            reply_markup=InlineKeyboardMarkup([[
-                                InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")
-                            ]])
-                        )
-                    except Exception as e:
-                        logger.error(f"Disconnect notify error: {e}")
-                else:
-                    wa_sessions.clear()
-
-            elif not was_auth and is_auth:
-                _green_state["authorized"] = True
-                logger.info("✅ Baileys: WhatsApp authorized")
-            elif is_auth:
-                _green_state["authorized"] = True
-
+            for uid in list(wa_sessions.keys()):
+                if not wa_sessions.get(uid, {}).get("connected"):
+                    continue
+                try:
+                    state = await green_get_state(uid)
+                    if state != "authorized":
+                        wa_sessions.pop(uid, None)
+                        logger.warning(f"⚠️ Baileys: WhatsApp disconnected! uid={uid}")
+                        try:
+                            await app.bot.send_message(
+                                int(uid),
+                                "⚠️ *WhatsApp Disconnected!*\n\n"
+                                "তোমার WhatsApp থেকে bot disconnect হয়েছে।\n"
+                                "আবার connect করতে নিচের button চাপো।",
+                                parse_mode="Markdown",
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")
+                                ]])
+                            )
+                        except Exception as e:
+                            logger.error(f"Disconnect notify error uid={uid}: {e}")
+                except Exception as e:
+                    logger.error(f"Baileys monitor error uid={uid}: {e}")
         except Exception as e:
-            logger.error(f"Baileys monitor error: {e}")
+            logger.error(f"Baileys monitor loop error: {e}")
 
 async def get_wa_pairing_code(phone: str, user_id: str) -> str:
     """
-    Baileys pairing code।
-    Global lock: একসাথে একজনই pairing করতে পারবে।
+    Baileys pairing code — per user session।
     """
-    global _wa_pair_lock
-    if _wa_pair_lock is None:
-        _wa_pair_lock = asyncio.Lock()
-
     digits = re.sub(r"\D", "", phone)
-    logger.info(f"📱 Baileys pairing for: +{digits}")
+    logger.info(f"📱 Baileys pairing for: +{digits} uid={user_id}")
 
-    async with _wa_pair_lock:
-        loop   = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            lambda: baileys_request("POST", "/pair", {"phone": digits})
-        )
-        logger.info(f"Baileys pairing result: {result}")
-        if result.get("connected"):
-            raise Exception("WhatsApp ইতিমধ্যে connected আছে।")
-        if result.get("code"):
-            code  = str(result["code"])
-            clean = re.sub(r"[^A-Z0-9]", "", code.upper())
-            if len(clean) >= 8:
-                return f"{clean[:4]}-{clean[4:8]}"
-            return code
-        raise Exception(
-            result.get("error") or
-            "Pairing code পাওয়া যায়নি। Baileys server চালু আছে কিনা দেখো।"
-        )
+    loop = asyncio.get_event_loop()
+
+    # Session start করো
+    await loop.run_in_executor(
+        None,
+        lambda: baileys_request("POST", "/start", {"userId": user_id})
+    )
+    await asyncio.sleep(3)
+
+    result = await loop.run_in_executor(
+        None,
+        lambda: baileys_request("POST", "/pair", {"phone": digits, "userId": user_id})
+    )
+    logger.info(f"Baileys pairing result: {result}")
+    if result.get("connected"):
+        raise Exception("WhatsApp ইতিমধ্যে connected আছে।")
+    if result.get("code"):
+        code  = str(result["code"])
+        clean = re.sub(r"[^A-Z0-9]", "", code.upper())
+        if len(clean) >= 8:
+            return f"{clean[:4]}-{clean[4:8]}"
+        return code
+    raise Exception(
+        result.get("error") or
+        "Pairing code পাওয়া যায়নি। Baileys server চালু আছে কিনা দেখো।"
+    )
 
 async def monitor_wa_connection(uid: str, context):
     """
-    Pairing এর পর Baileys state poll করো।
+    Pairing এর পর per-user Baileys state poll করো।
     """
     logger.info(f"🔍 Waiting for WA auth: {uid}")
     for _ in range(60):
         await asyncio.sleep(5)
         try:
-            state = await green_get_state()
+            state = await green_get_state(uid)
             if state == "authorized":
-                _green_state["authorized"] = True
-                _green_owner["uid"]        = uid
-                save_green_owner()
-                wa_sessions[uid]           = {"connected": True}
+                wa_sessions[uid] = {"connected": True}
                 logger.info(f"✅ WA connected: uid={uid}")
                 try:
                     await context.bot.send_message(
@@ -459,20 +435,20 @@ async def monitor_wa_connection(uid: str, context):
 
 async def check_wa_number(phone: str, user_id: str):
     """
-    Baileys onWhatsApp check — দ্রুত, lock নেই।
+    Baileys onWhatsApp check — per user।
     """
-    if not _green_state.get("authorized"):
-        state = await green_get_state()
+    if not wa_sessions.get(user_id, {}).get("connected"):
+        state = await green_get_state(user_id)
         if state != "authorized":
             return None
-        _green_state["authorized"] = True
+        wa_sessions[user_id] = {"connected": True}
 
     digits = re.sub(r"\D", "", phone)
     loop   = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(
             None,
-            lambda: baileys_request("POST", "/check", {"numbers": [digits]})
+            lambda: baileys_request("POST", "/check", {"numbers": [digits], "userId": user_id})
         )
         logger.info(f"📱 WA check +{digits}: {result}")
         results = result.get("results", {})
@@ -893,7 +869,7 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price   = get_otp_price(cc)
 
     # শুধু যে ইউজার WA connect করেছে সে-ই WA check পাবে
-    wa_connected = _green_state.get("authorized", False) and str(_green_owner.get("uid")) == uid
+    wa_connected = wa_sessions.get(uid, {}).get("connected", False)
     nums_text = "\n".join(
         f"{i+1}. `+{n}`" + (" ⏳" if wa_connected else "")
         for i, n in enumerate(nums)
@@ -918,7 +894,7 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if wa_connected:
         # শুধু owner disconnect করতে পারবে
         buttons.append([InlineKeyboardButton("🔴 Disconnect WhatsApp", callback_data="wa_disconnect")])
-    elif not _green_state.get("authorized", False):
+    else:
         # কেউ connect না থাকলে Connect বাটন দেখাও
         buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
 
@@ -979,7 +955,7 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     svc     = services.get(svc_id, {"icon": "📞", "name": svc_id})
     price   = get_otp_price(cc)
     # শুধু যে ইউজার WA connect করেছে সে-ই WA check পাবে
-    wa_connected = _green_state.get("authorized", False) and str(_green_owner.get("uid")) == uid
+    wa_connected = wa_sessions.get(uid, {}).get("connected", False)
 
     nums_text = "\n".join(
         f"{i+1}. `+{n}`" + (" ⏳" if wa_connected else "")
@@ -1005,7 +981,7 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if wa_connected:
         # শুধু owner disconnect করতে পারবে
         buttons.append([InlineKeyboardButton("🔴 Disconnect WhatsApp", callback_data="wa_disconnect")])
-    elif not _green_state.get("authorized", False):
+    else:
         # কেউ connect না থাকলে Connect বাটন দেখাও
         buttons.append([InlineKeyboardButton("📱 Connect WhatsApp", callback_data="wa_connect")])
 
@@ -1233,21 +1209,19 @@ async def cb_wa_connect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid  = str(update.effective_user.id)
 
-    # যদি ইতিমধ্যে connected থাকে, logout বাটন দেখাও
-    if _green_state.get("authorized"):
-        owner_uid = str(_green_owner.get("uid") or "")
-        if owner_uid == uid or wa_sessions.get(uid, {}).get("connected"):
-            await query.edit_message_text(
-                "✅ *WhatsApp Already Connected!*\n\n"
-                "🟢 WhatsApp এখন active আছে।\n"
-                "Disconnect করতে নিচের বাটন চাপো:",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔴 Logout / Disconnect", callback_data="wa_disconnect")],
-                    [InlineKeyboardButton("📊 Check Status", callback_data="wa_status")],
-                ])
-            )
-            return
+    # যদি ইতিমধ্যে connected থাকে
+    if wa_sessions.get(uid, {}).get("connected"):
+        await query.edit_message_text(
+            "✅ *WhatsApp Already Connected!*\n\n"
+            "🟢 WhatsApp এখন active আছে।\n"
+            "Disconnect করতে নিচের বাটন চাপো:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔴 Logout / Disconnect", callback_data="wa_disconnect")],
+                [InlineKeyboardButton("📊 Check Status", callback_data="wa_status")],
+            ])
+        )
+        return
 
     sess = get_session(uid)
     sess["state"] = "wa_waiting_number"
@@ -1261,9 +1235,8 @@ async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("⏳ Checking...")
     uid   = str(update.effective_user.id)
 
-    # Green API থেকে real-time state নাও
     try:
-        state = await green_get_state()
+        state = await green_get_state(uid)
     except:
         state = "notAuthorized"
 
@@ -1276,8 +1249,6 @@ async def cb_wa_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     STATE_MAP = {
         "authorized":    "✅ *WhatsApp Connected!*\n\nNumber assign হলে 📱/❌ দেখাবে।",
         "notAuthorized": "🔴 *WhatsApp connected নেই।*\n\nCode enter করলে আবার Check Status চাপো।",
-        "blocked":       "⛔ *WhatsApp instance blocked!*\n\nAdmin কে জানান।",
-        "sleepMode":     "😴 *WhatsApp sleep mode এ আছে।*\n\nকিছুক্ষণ পর আবার check করো।",
     }
     text = STATE_MAP.get(state, f"❓ Unknown state: {state}")
     btns = [[InlineKeyboardButton("🔴 Disconnect", callback_data="wa_disconnect")]] if conn else \
@@ -1289,20 +1260,14 @@ async def cb_wa_disconnect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("⏳ Disconnecting...")
     uid = str(update.effective_user.id)
 
-    # Baileys server থেকে logout করো
     try:
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: baileys_request("POST", "/disconnect"))
+        await loop.run_in_executor(None, lambda: baileys_request("POST", "/disconnect", {"userId": uid}))
         logger.info(f"✅ Baileys logout called for uid={uid}")
     except Exception as e:
         logger.error(f"Baileys logout error: {e}")
 
-    # Session ও state clear করো
     wa_sessions.pop(uid, None)
-    _green_state["authorized"] = False
-    if _green_owner.get("uid") == uid:
-        _green_owner["uid"] = None
-        save_green_owner()
 
     await query.edit_message_text(
         "🔴 *WhatsApp Disconnected!*\n\n"
