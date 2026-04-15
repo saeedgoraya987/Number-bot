@@ -293,12 +293,17 @@ def extract_otp(text: str):
 
 def generate_totp(secret: str):
     try:
-        clean = secret.replace(" ", "").upper()
+        clean = secret.replace(" ", "").replace("-", "").upper()
+        # Add base32 padding if needed (pyotp requires padding)
+        missing_padding = (8 - len(clean) % 8) % 8
+        if missing_padding:
+            clean += "=" * missing_padding
         totp = pyotp.TOTP(clean)
         token = totp.now()
         remaining = 30 - (int(time.time()) % 30)
         return {"token": token, "timeRemaining": remaining}
-    except:
+    except Exception as e:
+        logger.error(f"generate_totp error (secret_len={len(secret)}): {e}")
         return None
 
 # ─── Baileys API (WhatsApp) Helpers ───
@@ -1414,6 +1419,11 @@ async def cb_totp_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess["state"] = "totp_waiting_secret"
     sess["data"]  = {"service": svc}
 
+    # Persist totp pending service so it survives bot restart
+    if uid in users:
+        users[uid]["pending_totp_svc"] = svc
+        save_users()
+
     icons = {"facebook": "📘", "instagram": "📸", "google": "🔍", "other": "⚙️"}
     names = {"facebook": "Facebook", "instagram": "Instagram", "google": "Google", "other": "Other"}
     icon  = icons.get(svc, "🔐")
@@ -1446,6 +1456,14 @@ async def cb_totp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer("🔄 Refreshing...")
     _, svc, secret_enc = query.data.split(":", 2)
+
+    if secret_enc == "TOOLONG":
+        await query.edit_message_text(
+            "⚠️ Secret key টি অনেক বড়। Refresh করতে আবার 🔐 2FA বাটন চাপুন।",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="totp_back")]])
+        )
+        return
+
     secret = urllib.parse.unquote(secret_enc)
     result = generate_totp(secret)
 
@@ -1457,6 +1475,8 @@ async def cb_totp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not result:
         return await query.edit_message_text("❌ Invalid secret key.", parse_mode="Markdown")
 
+    cb_data = f"totp_r:{svc}:{secret_enc}"
+
     try:
         await query.edit_message_text(
             f"{icon} *{name} 2FA Code*\n\n"
@@ -1464,7 +1484,7 @@ async def cb_totp_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏰ *{result['timeRemaining']} seconds remaining*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Refresh Code", callback_data=f"totp_r:{svc}:{urllib.parse.quote(secret)}")],
+                [InlineKeyboardButton("🔄 Refresh Code", callback_data=cb_data)],
                 [InlineKeyboardButton("🔙 Back", callback_data="totp_back")],
             ])
         )
@@ -1533,21 +1553,35 @@ async def cb_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.answer("❌ Admin only")
     await query.answer()
 
-    total = len(users)
-    msg   = f"👥 *User Statistics*\n\n• Total: {total}\n• Active: {len(active_numbers)}\n• OTPs: {len(otp_log)}\n\n"
+    try:
+        total = len(users)
+        msg   = f"👥 *User Statistics*\n\n• Total: {total}\n• Active: {len(active_numbers)}\n• OTPs: {len(otp_log)}\n\n"
 
-    recent = sorted(users.values(), key=lambda u: u.get("last_active",""), reverse=True)[:10]
-    for u in recent:
-        msg += f"👤 *{u.get('first_name','')}*\n🆔 `{u['id']}` | @{u.get('username','')}\n"
-        msg += f"🕐 {get_time_ago(u.get('last_active', ''))}\n\n"
+        recent = sorted(users.values(), key=lambda u: u.get("last_active",""), reverse=True)[:10]
+        for u in recent:
+            uid_str  = u.get('id', '?')
+            fname    = u.get('first_name', '').replace('*','').replace('_','').replace('`','')
+            uname    = u.get('username', 'no_username').replace('_','\\_')
+            msg += f"👤 *{fname}*\n🆔 `{uid_str}` | @{uname}\n"
+            msg += f"🕐 {get_time_ago(u.get('last_active', ''))}\n\n"
 
-    if len(msg) > 4000:
-        msg = msg[:3950] + "..._truncated_"
+        if len(msg) > 4000:
+            msg = msg[:3950] + "..._truncated_"
 
-    await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Refresh", callback_data="admin_users")],
-        [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
-    ]))
+        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="admin_users")],
+            [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+        ]))
+    except Exception as e:
+        logger.error(f"cb_admin_users error: {e}", exc_info=True)
+        try:
+            await query.edit_message_text(
+                f"❌ *Error loading user stats*\n\n`{str(e)[:200]}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]])
+            )
+        except:
+            pass
 
 async def cb_admin_otp_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2146,28 +2180,62 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── TOTP secret input ──
-    if state == "totp_waiting_secret":
+    # Check both in-memory state AND persisted pending (survives bot restart)
+    pending_totp_svc = users.get(uid, {}).get("pending_totp_svc")
+    if state == "totp_waiting_secret" or pending_totp_svc:
         sess["state"] = None
-        svc    = (sess.get("data") or {}).get("service", "other")
-        result = generate_totp(text)
+        svc = (sess.get("data") or {}).get("service") or pending_totp_svc or "other"
+
+        # Clear persisted pending state
+        if uid in users and "pending_totp_svc" in users[uid]:
+            del users[uid]["pending_totp_svc"]
+            save_users()
+
+        try:
+            result = generate_totp(text)
+        except Exception as e:
+            logger.error(f"TOTP exception uid={uid}: {e}")
+            result = None
+
         if not result:
-            return await update.message.reply_text("❌ *Invalid secret key!* Please try again.", parse_mode="Markdown")
+            await update.message.reply_text(
+                "❌ *Invalid secret key!*\n\n"
+                "Key টি সঠিক নয়। Authenticator app থেকে exact secret key copy করো।\n"
+                "Example format: `JBSWY3DPEHPK3PXP`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Try Again", callback_data=f"totp:{svc}")],
+                    [InlineKeyboardButton("🔙 Back", callback_data="totp_back")],
+                ])
+            )
+            return
 
         icons = {"facebook": "📘", "instagram": "📸", "google": "🔍", "other": "⚙️"}
         names = {"facebook": "Facebook", "instagram": "Instagram", "google": "Google", "other": "2FA"}
         icon  = icons.get(svc, "🔐")
         name  = names.get(svc, svc)
 
-        await update.message.reply_text(
-            f"{icon} *{name} 2FA Code*\n\n"
-            f"🔑 *Code:* `{result['token']}`\n\n"
-            f"⏰ *{result['timeRemaining']} seconds remaining*",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Refresh Code", callback_data=f"totp_r:{svc}:{urllib.parse.quote(text)}")],
-                [InlineKeyboardButton("🔙 Back", callback_data="totp_back")],
-            ])
-        )
+        # Build refresh callback (max 64 bytes for Telegram)
+        secret_quoted = urllib.parse.quote(text)
+        cb_data = f"totp_r:{svc}:{secret_quoted}"
+        if len(cb_data.encode()) > 62:
+            # Truncate gracefully – secret too long for inline button
+            cb_data = f"totp_r:{svc}:TOOLONG"
+
+        try:
+            await update.message.reply_text(
+                f"{icon} *{name} 2FA Code*\n\n"
+                f"🔑 *Code:* `{result['token']}`\n\n"
+                f"⏰ *{result['timeRemaining']} seconds remaining*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Refresh Code", callback_data=cb_data)],
+                    [InlineKeyboardButton("🔙 Back", callback_data="totp_back")],
+                ])
+            )
+        except Exception as e:
+            logger.error(f"TOTP reply error uid={uid}: {e}")
+            await update.message.reply_text(f"✅ 2FA Code: {result['token']} (⏰ {result['timeRemaining']}s)")
         return
 
     # ── Withdraw account input ──
