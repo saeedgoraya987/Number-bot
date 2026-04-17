@@ -1388,29 +1388,44 @@ async def cb_tm_create(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid   = str(update.effective_user.id)
     loading = await context.bot.send_message(uid, "⏳ *Creating your email...*", parse_mode="Markdown")
 
-    new_email = await create_fresh_email()
-    if not new_email:
-        await context.bot.edit_message_text(
-            "❌ *Email creation failed.* Please try again.",
-            chat_id=uid, message_id=loading.message_id,
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Retry", callback_data="tm_create")]])
-        )
-        return
+    # ── Background task — mail.tm API call block করবে না ──
+    async def _create_task():
+        try:
+            new_email = await create_fresh_email()
+            if not new_email:
+                await context.bot.edit_message_text(
+                    "❌ *Email creation failed.* Please try again.",
+                    chat_id=uid, message_id=loading.message_id,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Retry", callback_data="tm_create")]])
+                )
+                return
 
-    temp_mails[uid] = new_email
-    save_temp_mails()
+            temp_mails[uid] = new_email
+            save_temp_mails()
 
-    await context.bot.edit_message_text(
-        f"✅ *New Email Created!*\n\n📧 `{new_email['address']}`\n\n📌 Use this on any website.",
-        chat_id=uid, message_id=loading.message_id,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📬 Check Inbox", callback_data="tm_inbox")],
-            [InlineKeyboardButton("🔄 Get New Email", callback_data="tm_create")],
-            [InlineKeyboardButton("🗑️ Delete", callback_data="tm_delete")],
-        ])
-    )
+            await context.bot.edit_message_text(
+                f"✅ *New Email Created!*\n\n📧 `{new_email['address']}`\n\n📌 Use this on any website.",
+                chat_id=uid, message_id=loading.message_id,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📬 Check Inbox", callback_data="tm_inbox")],
+                    [InlineKeyboardButton("🔄 Get New Email", callback_data="tm_create")],
+                    [InlineKeyboardButton("🗑️ Delete", callback_data="tm_delete")],
+                ])
+            )
+        except Exception as e:
+            logger.error(f"cb_tm_create task error uid={uid}: {e}")
+            try:
+                await context.bot.edit_message_text(
+                    "❌ *Error occurred.* Please try again.",
+                    chat_id=uid, message_id=loading.message_id,
+                    parse_mode="Markdown"
+                )
+            except:
+                pass
+
+    asyncio.create_task(_create_task())
 
 async def cb_tm_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1424,31 +1439,38 @@ async def cb_tm_inbox(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     email_obj = temp_mails[uid]
-    messages  = await get_email_inbox(email_obj)
-    now_str   = datetime.now().strftime("%I:%M:%S %p")
-    text      = f"📬 *Inbox:* `{email_obj['address']}`\n🕐 _{now_str}_\n\n"
 
-    if not messages:
-        text += "📭 *No emails yet.*"
-    else:
-        for msg in messages[:5]:
-            text += f"━━━━━━━━━━\n📩 *From:* {msg['from']}\n📌 *Subject:* {msg['subject']}\n"
-            body = await get_email_message(msg["id"], email_obj)
-            if body:
-                otp_m = re.findall(r"\b\d{4,8}\b", body)
-                if otp_m:
-                    text += f"\n🔑 *OTP:* `{otp_m[0]}`\n"
-                text += f"\n📝 _{body[:250]}..._\n" if len(body) > 250 else f"\n📝 _{body}_\n"
-            text += "\n"
+    async def _inbox_task():
+        try:
+            messages  = await get_email_inbox(email_obj)
+            now_str   = datetime.now().strftime("%I:%M:%S %p")
+            text      = f"📬 *Inbox:* `{email_obj['address']}`\n🕐 _{now_str}_\n\n"
 
-    try:
-        await query.edit_message_text(text[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh", callback_data="tm_inbox")],
-            [InlineKeyboardButton("🔄 New Email", callback_data="tm_create")],
-            [InlineKeyboardButton("🗑️ Delete", callback_data="tm_delete")],
-        ]))
-    except:
-        pass
+            if not messages:
+                text += "📭 *No emails yet.*"
+            else:
+                for msg in messages[:5]:
+                    text += f"━━━━━━━━━━\n📩 *From:* {msg['from']}\n📌 *Subject:* {msg['subject']}\n"
+                    body = await get_email_message(msg["id"], email_obj)
+                    if body:
+                        otp_m = re.findall(r"\b\d{4,8}\b", body)
+                        if otp_m:
+                            text += f"\n🔑 *OTP:* `{otp_m[0]}`\n"
+                        text += f"\n📝 _{body[:250]}..._\n" if len(body) > 250 else f"\n📝 _{body}_\n"
+                    text += "\n"
+
+            try:
+                await query.edit_message_text(text[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔄 Refresh", callback_data="tm_inbox")],
+                    [InlineKeyboardButton("🔄 New Email", callback_data="tm_create")],
+                    [InlineKeyboardButton("🗑️ Delete", callback_data="tm_delete")],
+                ]))
+            except:
+                pass
+        except Exception as e:
+            logger.error(f"cb_tm_inbox task error uid={uid}: {e}")
+
+    asyncio.create_task(_inbox_task())
 
 async def cb_tm_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2697,7 +2719,7 @@ async def scheduled_membership_check(app):
 
 # ─── Main ───
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
 
     # Commands
     app.add_handler(CommandHandler("start", cmd_start))
