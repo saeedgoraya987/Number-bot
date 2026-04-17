@@ -176,6 +176,42 @@ load_numbers()
 
 # ─── Save Functions ───
 def save_settings():    save_json(SETTINGS_FILE, settings)
+
+# ─── Safe Edit Helper ───
+async def safe_edit(query, text, **kwargs):
+    """edit_message_text — 'not modified' error silently ignore করে।"""
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except Exception as e:
+        if "not modified" in str(e).lower():
+            pass
+        else:
+            raise
+
+# ─── Async Save Helpers (heavy file I/O — event loop block করে না) ───
+async def async_save_numbers():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, save_numbers)
+
+async def async_save_users():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, save_users)
+
+async def async_save_active():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, save_active)
+
+async def async_save_otp_log():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, save_otp_log)
+
+async def async_save_earnings():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, save_earnings)
+
+async def async_save_withdrawals():
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, save_withdrawals)
 def save_users():       save_json(USERS_FILE, users)
 def save_active():      save_json(ACTIVE_NUMBERS_FILE, active_numbers)
 def save_otp_log():     save_json(OTP_LOG_FILE, otp_log[-1000:])
@@ -215,33 +251,40 @@ def get_user_earnings(uid: str) -> dict:
         earnings[uid] = {"balance": 0, "totalEarned": 0, "otpCount": 0}
     return earnings[uid]
 
-def add_earning(uid: str, cc: str) -> float:
+async def add_earning(uid: str, cc: str) -> float:
     uid = str(uid)
     price = get_otp_price(cc)
     e = get_user_earnings(uid)
     e["balance"]      = round(e["balance"] + price, 2)
     e["totalEarned"]  = round(e["totalEarned"] + price, 2)
     e["otpCount"]     = e.get("otpCount", 0) + 1
-    save_earnings()
+    await async_save_earnings()
     return price
 
 def get_time_ago(dt_str: str) -> str:
     try:
+        if not dt_str:
+            return "unknown"
         dt = datetime.fromisoformat(dt_str.replace("Z", "+00:00"))
+        # Naive datetime হলে UTC ধরে নাও
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
         secs = int((now - dt).total_seconds())
+        if secs < 0:    return "just now"
         if secs < 60:   return f"{secs} seconds ago"
         if secs < 3600: return f"{secs // 60} minutes ago"
         if secs < 86400:return f"{secs // 3600} hours ago"
         return f"{secs // 86400} days ago"
-    except:
+    except Exception as e:
+        logger.warning(f"get_time_ago error for '{dt_str}': {e}")
         return "unknown"
 
 def get_available_countries_for_service(svc: str) -> list:
     return [cc for cc, svcs in numbers_by_cs.items()
             if svc in svcs and svcs[svc] and cc in countries]
 
-def get_multiple_numbers(cc: str, svc: str, uid: str, count: int) -> list:
+async def get_multiple_numbers(cc: str, svc: str, uid: str, count: int) -> list:
     if cc not in numbers_by_cs or svc not in numbers_by_cs[cc]:
         return []
     pool = numbers_by_cs[cc][svc]
@@ -255,8 +298,8 @@ def get_multiple_numbers(cc: str, svc: str, uid: str, count: int) -> list:
             "userId": str(uid), "countryCode": cc, "service": svc,
             "assignedAt": now, "lastOTP": None, "otpCount": 0
         }
-    save_numbers()
-    save_active()
+    await async_save_numbers()
+    await async_save_active()
     return nums
 
 def extract_phone_from_text(text: str):
@@ -264,26 +307,56 @@ def extract_phone_from_text(text: str):
     return m.group(1) if m else None
 
 def find_matching_active_number(text: str):
+    # ── Strategy 1: Full number direct match ──
     for num in list(active_numbers.keys()):
         if num in text:
             return num
+
+    # ── Strategy 2: Masked format — "79215***3002" বা "7921*****002" ──
+    # Text থেকে masked pattern বের করো: digits + stars + digits
+    masked_patterns = re.findall(r'(\d{3,})\*+(\d{2,})', text)
+    if masked_patterns:
+        for prefix, suffix in masked_patterns:
+            for num in list(active_numbers.keys()):
+                if num.startswith(prefix) and num.endswith(suffix):
+                    return num
+
+    # ── Strategy 3: "Number: XXXXX" field থেকে prefix match ──
+    # "Number: 79215***3002" থেকে প্রথম digits বের করো
+    num_field = re.search(r'[Nn]umber[:\s]+(\d{4,})', text)
+    if num_field:
+        prefix = num_field.group(1)
+        for num in list(active_numbers.keys()):
+            if num.startswith(prefix):
+                return num
+
+    # ── Strategy 4: Last 8/6/4 digits fallback ──
     for num in list(active_numbers.keys()):
         if num[-8:] in text:
             return num
     for num in list(active_numbers.keys()):
         if num[-6:] in text:
             return num
+    # Last 4 — শুধু যদি text-এ exact masked pattern থাকে
     for num in list(active_numbers.keys()):
-        if num[-4:] in text:
+        suffix4 = num[-4:]
+        # Avoid false positives — শুধু ***XXXX বা number field-এ match করো
+        if re.search(r'\*+' + re.escape(suffix4) + r'\b', text):
             return num
+
     return None
 
 def extract_otp(text: str):
     patterns = [
-        r"(?:otp|code|pin|verification|verify|token)[^\d]{0,10}(\d{4,8})",
-        r"(?:is|has|:)\s*(\d{4,8})\b",
-        r"\b(\d{6})\b",
-        r"\b(\d{4})\b",
+        # OTP Monitor Bot format: "OTP Code: 111111"
+        r'OTP\s*Code[:\s]+(\d{4,8})',
+        # "G-111111" Google style
+        r'\b[A-Z]-(\d{4,8})\b',
+        # Generic: otp/code/pin keyword near digits
+        r'(?:otp|code|pin|verification|verify|token)[^\d]{0,10}(\d{4,8})',
+        r'(?:is|has|:)\s*(\d{4,8})\b',
+        r'\b(\d{6})\b',
+        r'\b(\d{4})\b',
     ]
     for p in patterns:
         m = re.search(p, text, re.IGNORECASE)
@@ -491,13 +564,20 @@ def mailtm_request(method: str, path: str, body=None, token=None):
         logger.error(f"Mail.tm error: {e}")
         return None
 
+async def mailtm_request_async(method: str, path: str, body=None, token=None):
+    """Non-blocking wrapper — event loop block হয় না।"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, lambda: mailtm_request(method, path, body, token)
+    )
+
 def random_str(n: int, chars="abcdefghijklmnopqrstuvwxyz0123456789") -> str:
     import random
     return "".join(random.choice(chars) for _ in range(n))
 
 async def create_fresh_email():
     try:
-        domains = mailtm_request("GET", "/domains?page=1")
+        domains = await mailtm_request_async("GET", "/domains?page=1")
         domain_list = domains if isinstance(domains, list) else (domains or {}).get("hydra:member", [])
         if not domain_list:
             return None
@@ -509,7 +589,7 @@ async def create_fresh_email():
 
         account = None
         for _ in range(3):
-            account = mailtm_request("POST", "/accounts", {"address": address, "password": password})
+            account = await mailtm_request_async("POST", "/accounts", {"address": address, "password": password})
             if account and account.get("id"):
                 break
             await asyncio.sleep(3)
@@ -517,7 +597,7 @@ async def create_fresh_email():
         if not account or not account.get("id"):
             return None
 
-        token_res = mailtm_request("POST", "/token", {"address": address, "password": password})
+        token_res = await mailtm_request_async("POST", "/token", {"address": address, "password": password})
         if not token_res or not token_res.get("token"):
             return None
 
@@ -533,7 +613,7 @@ async def create_fresh_email():
 
 async def get_email_inbox(email_obj: dict):
     try:
-        data = mailtm_request("GET", "/messages?page=1", token=email_obj.get("sidToken"))
+        data = await mailtm_request_async("GET", "/messages?page=1", token=email_obj.get("sidToken"))
         msgs = data if isinstance(data, list) else (data or {}).get("hydra:member", [])
         return [{"id": m.get("id"), "from": (m.get("from") or {}).get("address", ""),
                  "subject": m.get("subject", ""), "date": m.get("createdAt", "")} for m in msgs]
@@ -542,7 +622,7 @@ async def get_email_inbox(email_obj: dict):
 
 async def get_email_message(msg_id: str, email_obj: dict) -> str:
     try:
-        data = mailtm_request("GET", f"/messages/{msg_id}", token=email_obj.get("sidToken"))
+        data = await mailtm_request_async("GET", f"/messages/{msg_id}", token=email_obj.get("sidToken"))
         if not data:
             return ""
         text = data.get("text", "")
@@ -647,7 +727,7 @@ async def ensure_verified(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         sess["last_verification_check"] = now
         if uid in users:
             users[uid]["verified"] = True
-            save_users()
+            await async_save_users()
         return True
 
     sess["verified"] = False
@@ -680,7 +760,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "last_active": datetime.now().isoformat(),
                 "verified": False,
             }
-            save_users()
+            await async_save_users()
 
         sess = get_session(uid)
         sess["state"] = None
@@ -728,7 +808,7 @@ async def cb_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sess["is_admin"] = True
         if uid in users:
             users[uid]["verified"] = True
-            save_users()
+            await async_save_users()
 
         await query.edit_message_text("✅ *VERIFICATION SUCCESSFUL!*\n\nYou can now use all features.", parse_mode="Markdown")
         await context.bot.send_message(
@@ -855,14 +935,14 @@ async def cb_select_country(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining = int(cooldown - (now - sess["last_number_time"]))
         return await query.answer(f"⏳ {remaining} সেকেন্ড অপেক্ষা করো।", show_alert=True)
 
-    nums = get_multiple_numbers(cc, svc_id, uid, count)
+    nums = await get_multiple_numbers(cc, svc_id, uid, count)
     if not nums:
         return await query.answer("❌ Not enough numbers available.", show_alert=True)
 
     # Release old numbers
     for old in sess["current_numbers"]:
         active_numbers.pop(old, None)
-    save_active()
+    await async_save_active()
 
     sess["current_numbers"] = nums
     sess["current_service"] = svc_id
@@ -947,7 +1027,7 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for old in sess["current_numbers"]:
         active_numbers.pop(old, None)
-    save_active()
+    await async_save_active()
 
     sess["current_numbers"] = nums
     sess["last_number_time"] = now
@@ -1422,7 +1502,7 @@ async def cb_totp_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Persist totp pending service so it survives bot restart
     if uid in users:
         users[uid]["pending_totp_svc"] = svc
-        save_users()
+        await async_save_users()
 
     icons = {"facebook": "📘", "instagram": "📸", "google": "🔍", "other": "⚙️"}
     names = {"facebook": "Facebook", "instagram": "Instagram", "google": "Google", "other": "Other"}
@@ -1541,7 +1621,7 @@ async def cb_admin_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(report) > 4000:
         report = report[:3950] + "\n..._truncated_"
 
-    await query.edit_message_text(report, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+    await safe_edit(query, report, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Refresh", callback_data="admin_stock")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
     ]))
@@ -1568,10 +1648,13 @@ async def cb_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(msg) > 4000:
             msg = msg[:3950] + "..._truncated_"
 
-        await query.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh", callback_data="admin_users")],
-            [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
-        ]))
+        try:
+            await safe_edit(query, msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Refresh", callback_data="admin_users")],
+                [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
+            ]))
+        except Exception as edit_err:
+            raise
     except Exception as e:
         logger.error(f"cb_admin_users error: {e}", exc_info=True)
         try:
@@ -1598,7 +1681,7 @@ async def cb_admin_otp_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"📞 `{log['phoneNumber']}` → 👤 `{log['userId']}`\n"
             msg += f"🕐 {get_time_ago(log.get('timestamp',''))}\n\n"
 
-    await query.edit_message_text(msg[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+    await safe_edit(query, msg[:4000], parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Refresh", callback_data="admin_otp_log")],
         [InlineKeyboardButton("🔙 Back", callback_data="admin_back")],
     ]))
@@ -1764,7 +1847,7 @@ async def cb_withdraw_approve(update: Update, context: ContextTypes.DEFAULT_TYPE
         if w["id"] == wid:
             w["status"] = "approved"
             w["processedAt"] = datetime.now().isoformat()
-            save_withdrawals()
+            await async_save_withdrawals()
             await query.answer("✅ Approved!")
             try:
                 await context.bot.send_message(w["userId"],
@@ -1788,8 +1871,8 @@ async def cb_withdraw_reject(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Refund
             e = get_user_earnings(w["userId"])
             e["balance"] = round(e["balance"] + w["amount"], 2)
-            save_earnings()
-            save_withdrawals()
+            await async_save_earnings()
+            await async_save_withdrawals()
             await query.answer("❌ Rejected!")
             try:
                 await context.bot.send_message(w["userId"],
@@ -2050,7 +2133,7 @@ async def cb_del_exec(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del numbers_by_cs[cc][svc_id]
         if not numbers_by_cs[cc]:
             del numbers_by_cs[cc]
-    save_numbers()
+    await async_save_numbers()
     await query.edit_message_text(f"✅ *Deleted {count} numbers.*", parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="admin_back")]]))
 
@@ -2098,7 +2181,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             numbers_by_cs[cc][svc].append(num)
             added += 1
 
-    save_numbers()
+    await async_save_numbers()
     sess["state"] = None
     sess["data"]  = None
     await update.message.reply_text(f"✅ *{added} numbers uploaded successfully!*", parse_mode="Markdown")
@@ -2120,7 +2203,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "joined": datetime.now().isoformat(), "last_active": datetime.now().isoformat(), "verified": False
         }
     users[uid]["last_active"] = datetime.now().isoformat()
-    save_users()
+    await async_save_users()
 
     sess = get_session(uid)
     # Restore admin status from file if session was cleared (e.g. after restart)
@@ -2189,7 +2272,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Clear persisted pending state
         if uid in users and "pending_totp_svc" in users[uid]:
             del users[uid]["pending_totp_svc"]
-            save_users()
+            await async_save_users()
 
         try:
             result = generate_totp(text)
@@ -2302,7 +2385,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if num not in numbers_by_cs[cc][svc]:
                     numbers_by_cs[cc][svc].append(num)
                     added += 1
-        save_numbers()
+        await async_save_numbers()
         await update.message.reply_text(f"✅ *{added} numbers added!*", parse_mode="Markdown")
         return
 
@@ -2367,7 +2450,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 amount    = float(parts[1])
                 e         = get_user_earnings(target_id)
                 e["balance"] = round(e["balance"] + amount, 2)
-                save_earnings()
+                await async_save_earnings()
                 await update.message.reply_text(f"✅ *{amount:.2f} taka added to {target_id}.*", parse_mode="Markdown")
             except:
                 await update.message.reply_text("❌ Error.")
@@ -2384,7 +2467,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 amount    = float(parts[1])
                 e         = get_user_earnings(target_id)
                 e["balance"] = max(0, round(e["balance"] - amount, 2))
-                save_earnings()
+                await async_save_earnings()
                 await update.message.reply_text(f"✅ *{amount:.2f} taka deducted from {target_id}.*", parse_mode="Markdown")
             except:
                 await update.message.reply_text("❌ Error.")
@@ -2395,7 +2478,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = text.strip()
         e = get_user_earnings(target_id)
         e["balance"] = 0
-        save_earnings()
+        await async_save_earnings()
         await update.message.reply_text(f"✅ *{target_id}'s balance reset to 0.*", parse_mode="Markdown")
         return
 
@@ -2490,7 +2573,7 @@ async def cb_withdraw_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         return await query.edit_message_text("❌ Balance changed. Please try again.", parse_mode="Markdown")
 
     e["balance"] = round(e["balance"] - amount, 2)
-    save_earnings()
+    await async_save_earnings()
 
     wid = str(int(time.time() * 1000))
     withdrawals.append({
@@ -2500,7 +2583,7 @@ async def cb_withdraw_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE
         "amount": amount, "method": method, "account": account,
         "status": "pending", "requestedAt": datetime.now().isoformat(), "processedAt": None
     })
-    save_withdrawals()
+    await async_save_withdrawals()
     sess["state"] = None
     sess["data"]  = None
 
@@ -2525,9 +2608,11 @@ async def handle_otp_group_message(update: Update, context: ContextTypes.DEFAULT
     if not msg_text:
         return
 
-    logger.info(f"📨 OTP Group [{msg_id}]: {msg_text[:80]}")
+    logger.info(f"📨 OTP Group [{msg_id}]: {msg_text[:120]}")
+    logger.info(f"🔍 Active numbers count: {len(active_numbers)}")
     matched = find_matching_active_number(msg_text)
     if not matched:
+        logger.warning(f"⚠️ No active number matched for msg: {msg_text[:200]}")
         return
 
     data = active_numbers[matched]
@@ -2538,10 +2623,10 @@ async def handle_otp_group_message(update: Update, context: ContextTypes.DEFAULT
         return
     data["lastOTP"] = msg_id
     data["otpCount"] = data.get("otpCount", 0) + 1
-    save_active()
+    await async_save_active()
 
     otp_code = extract_otp(msg_text)
-    earned   = add_earning(uid, cc)
+    earned   = await add_earning(uid, cc)
     balance  = get_user_earnings(uid)["balance"]
     svc      = services.get(data.get("service",""), {"icon": "📱", "name": "Service"})
     country  = countries.get(cc, {"flag": "🌍", "name": cc})
@@ -2568,7 +2653,7 @@ async def handle_otp_group_message(update: Update, context: ContextTypes.DEFAULT
         "messageId": msg_id, "delivered": True,
         "timestamp": datetime.now().isoformat()
     })
-    save_otp_log()
+    await async_save_otp_log()
 
 # ─── /cancel command ───
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2607,7 +2692,7 @@ async def scheduled_membership_check(app):
                 await asyncio.sleep(0.1)
             except Exception as e:
                 logger.error(f"Scheduled check error for {uid}: {e}")
-        save_users()
+        await async_save_users()
         logger.info(f"✅ [Scheduled] {blocked} users blocked.")
 
 # ─── Main ───
