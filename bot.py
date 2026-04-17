@@ -474,10 +474,12 @@ async def get_multiple_numbers(cc: str, svc: str, uid: str, count: int) -> list:
     if cc not in numbers_by_cs or svc not in numbers_by_cs[cc]:
         return []
     pool = numbers_by_cs[cc][svc]
-    if len(pool) < count:
+    if not pool:
         return []
-    nums = pool[:count]
-    numbers_by_cs[cc][svc] = pool[count:]
+    # pool-এ যত আছে তত দাও — count-এর কম হলেও দাও
+    give = min(count, len(pool))
+    nums = pool[:give]
+    numbers_by_cs[cc][svc] = pool[give:]
     now = datetime.now(timezone.utc).isoformat()
     for n in nums:
         active_numbers[n] = {
@@ -1207,7 +1209,7 @@ async def cb_new_numbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await query.answer(f"⏳ {remaining} সেকেন্ড অপেক্ষা করো।", show_alert=True)
 
     count = settings.get("defaultNumberCount", 10)
-    nums  = get_multiple_numbers(cc, svc_id, uid, count)
+    nums  = await get_multiple_numbers(cc, svc_id, uid, count)
     if not nums:
         return await query.answer("❌ No numbers available.", show_alert=True)
 
