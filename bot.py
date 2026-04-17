@@ -105,12 +105,198 @@ country_prices = load_json(COUNTRY_PRICES_FILE, {})
 wa_sessions    = {}  # { user_id: { connected: bool } }
 
 countries = load_json(COUNTRIES_FILE, {
-    "880": {"name": "Bangladesh", "flag": "🇧🇩"},
-    "91":  {"name": "India",      "flag": "🇮🇳"},
-    "92":  {"name": "Pakistan",   "flag": "🇵🇰"},
-    "1":   {"name": "USA",        "flag": "🇺🇸"},
-    "44":  {"name": "UK",         "flag": "🇬🇧"},
-    "977": {"name": "Nepal",      "flag": "🇳🇵"},
+    # ── South Asia ──
+    "880": {"name": "Bangladesh",   "flag": "🇧🇩"},
+    "91":  {"name": "India",        "flag": "🇮🇳"},
+    "92":  {"name": "Pakistan",     "flag": "🇵🇰"},
+    "977": {"name": "Nepal",        "flag": "🇳🇵"},
+    "94":  {"name": "Sri Lanka",    "flag": "🇱🇰"},
+    "95":  {"name": "Myanmar",      "flag": "🇲🇲"},
+    "975": {"name": "Bhutan",       "flag": "🇧🇹"},
+    "960": {"name": "Maldives",     "flag": "🇲🇻"},
+    # ── Southeast Asia ──
+    "66":  {"name": "Thailand",     "flag": "🇹🇭"},
+    "84":  {"name": "Vietnam",      "flag": "🇻🇳"},
+    "62":  {"name": "Indonesia",    "flag": "🇮🇩"},
+    "60":  {"name": "Malaysia",     "flag": "🇲🇾"},
+    "63":  {"name": "Philippines",  "flag": "🇵🇭"},
+    "65":  {"name": "Singapore",    "flag": "🇸🇬"},
+    "855": {"name": "Cambodia",     "flag": "🇰🇭"},
+    "856": {"name": "Laos",         "flag": "🇱🇦"},
+    "673": {"name": "Brunei",       "flag": "🇧🇳"},
+    "670": {"name": "Timor-Leste",  "flag": "🇹🇱"},
+    # ── East Asia ──
+    "86":  {"name": "China",        "flag": "🇨🇳"},
+    "81":  {"name": "Japan",        "flag": "🇯🇵"},
+    "82":  {"name": "South Korea",  "flag": "🇰🇷"},
+    "886": {"name": "Taiwan",       "flag": "🇹🇼"},
+    "852": {"name": "Hong Kong",    "flag": "🇭🇰"},
+    "853": {"name": "Macau",        "flag": "🇲🇴"},
+    "976": {"name": "Mongolia",     "flag": "🇲🇳"},
+    "850": {"name": "North Korea",  "flag": "🇰🇵"},
+    # ── Central Asia ──
+    "7":   {"name": "Russia",       "flag": "🇷🇺"},
+    "996": {"name": "Kyrgyzstan",   "flag": "🇰🇬"},
+    "992": {"name": "Tajikistan",   "flag": "🇹🇯"},
+    "993": {"name": "Turkmenistan", "flag": "🇹🇲"},
+    "998": {"name": "Uzbekistan",   "flag": "🇺🇿"},
+    "7778":{"name": "Kazakhstan",   "flag": "🇰🇿"},
+    # ── Middle East ──
+    "93":  {"name": "Afghanistan",  "flag": "🇦🇫"},
+    "98":  {"name": "Iran",         "flag": "🇮🇷"},
+    "964": {"name": "Iraq",         "flag": "🇮🇶"},
+    "963": {"name": "Syria",        "flag": "🇸🇾"},
+    "961": {"name": "Lebanon",      "flag": "🇱🇧"},
+    "962": {"name": "Jordan",       "flag": "🇯🇴"},
+    "972": {"name": "Israel",       "flag": "🇮🇱"},
+    "970": {"name": "Palestine",    "flag": "🇵🇸"},
+    "966": {"name": "Saudi Arabia", "flag": "🇸🇦"},
+    "971": {"name": "UAE",          "flag": "🇦🇪"},
+    "974": {"name": "Qatar",        "flag": "🇶🇦"},
+    "973": {"name": "Bahrain",      "flag": "🇧🇭"},
+    "965": {"name": "Kuwait",       "flag": "🇰🇼"},
+    "968": {"name": "Oman",         "flag": "🇴🇲"},
+    "967": {"name": "Yemen",        "flag": "🇾🇪"},
+    "994": {"name": "Azerbaijan",   "flag": "🇦🇿"},
+    "374": {"name": "Armenia",      "flag": "🇦🇲"},
+    "995": {"name": "Georgia",      "flag": "🇬🇪"},
+    # ── Western Europe ──
+    "44":  {"name": "UK",           "flag": "🇬🇧"},
+    "49":  {"name": "Germany",      "flag": "🇩🇪"},
+    "33":  {"name": "France",       "flag": "🇫🇷"},
+    "39":  {"name": "Italy",        "flag": "🇮🇹"},
+    "34":  {"name": "Spain",        "flag": "🇪🇸"},
+    "31":  {"name": "Netherlands",  "flag": "🇳🇱"},
+    "32":  {"name": "Belgium",      "flag": "🇧🇪"},
+    "41":  {"name": "Switzerland",  "flag": "🇨🇭"},
+    "43":  {"name": "Austria",      "flag": "🇦🇹"},
+    "351": {"name": "Portugal",     "flag": "🇵🇹"},
+    "353": {"name": "Ireland",      "flag": "🇮🇪"},
+    "352": {"name": "Luxembourg",   "flag": "🇱🇺"},
+    "356": {"name": "Malta",        "flag": "🇲🇹"},
+    "357": {"name": "Cyprus",       "flag": "🇨🇾"},
+    # ── Northern Europe ──
+    "45":  {"name": "Denmark",      "flag": "🇩🇰"},
+    "46":  {"name": "Sweden",       "flag": "🇸🇪"},
+    "47":  {"name": "Norway",       "flag": "🇳🇴"},
+    "358": {"name": "Finland",      "flag": "🇫🇮"},
+    "354": {"name": "Iceland",      "flag": "🇮🇸"},
+    "370": {"name": "Lithuania",    "flag": "🇱🇹"},
+    "371": {"name": "Latvia",       "flag": "🇱🇻"},
+    "372": {"name": "Estonia",      "flag": "🇪🇪"},
+    # ── Southern/Eastern Europe ──
+    "30":  {"name": "Greece",       "flag": "🇬🇷"},
+    "48":  {"name": "Poland",       "flag": "🇵🇱"},
+    "420": {"name": "Czech Rep.",   "flag": "🇨🇿"},
+    "421": {"name": "Slovakia",     "flag": "🇸🇰"},
+    "36":  {"name": "Hungary",      "flag": "🇭🇺"},
+    "40":  {"name": "Romania",      "flag": "🇷🇴"},
+    "359": {"name": "Bulgaria",     "flag": "🇧🇬"},
+    "385": {"name": "Croatia",      "flag": "🇭🇷"},
+    "381": {"name": "Serbia",       "flag": "🇷🇸"},
+    "387": {"name": "Bosnia",       "flag": "🇧🇦"},
+    "386": {"name": "Slovenia",     "flag": "🇸🇮"},
+    "382": {"name": "Montenegro",   "flag": "🇲🇪"},
+    "389": {"name": "N. Macedonia", "flag": "🇲🇰"},
+    "355": {"name": "Albania",      "flag": "🇦🇱"},
+    "373": {"name": "Moldova",      "flag": "🇲🇩"},
+    "380": {"name": "Ukraine",      "flag": "🇺🇦"},
+    "375": {"name": "Belarus",      "flag": "🇧🇾"},
+    "383": {"name": "Kosovo",       "flag": "🇽🇰"},
+    # ── North America ──
+    "1":   {"name": "USA/Canada",   "flag": "🇺🇸"},
+    "52":  {"name": "Mexico",       "flag": "🇲🇽"},
+    # ── Central America & Caribbean ──
+    "506": {"name": "Costa Rica",   "flag": "🇨🇷"},
+    "502": {"name": "Guatemala",    "flag": "🇬🇹"},
+    "504": {"name": "Honduras",     "flag": "🇭🇳"},
+    "503": {"name": "El Salvador",  "flag": "🇸🇻"},
+    "505": {"name": "Nicaragua",    "flag": "🇳🇮"},
+    "507": {"name": "Panama",       "flag": "🇵🇦"},
+    "53":  {"name": "Cuba",         "flag": "🇨🇺"},
+    "509": {"name": "Haiti",        "flag": "🇭🇹"},
+    "501": {"name": "Belize",       "flag": "🇧🇿"},
+    # ── South America ──
+    "55":  {"name": "Brazil",       "flag": "🇧🇷"},
+    "54":  {"name": "Argentina",    "flag": "🇦🇷"},
+    "56":  {"name": "Chile",        "flag": "🇨🇱"},
+    "57":  {"name": "Colombia",     "flag": "🇨🇴"},
+    "51":  {"name": "Peru",         "flag": "🇵🇪"},
+    "58":  {"name": "Venezuela",    "flag": "🇻🇪"},
+    "593": {"name": "Ecuador",      "flag": "🇪🇨"},
+    "591": {"name": "Bolivia",      "flag": "🇧🇴"},
+    "595": {"name": "Paraguay",     "flag": "🇵🇾"},
+    "598": {"name": "Uruguay",      "flag": "🇺🇾"},
+    "592": {"name": "Guyana",       "flag": "🇬🇾"},
+    "597": {"name": "Suriname",     "flag": "🇸🇷"},
+    # ── North Africa ──
+    "20":  {"name": "Egypt",        "flag": "🇪🇬"},
+    "213": {"name": "Algeria",      "flag": "🇩🇿"},
+    "212": {"name": "Morocco",      "flag": "🇲🇦"},
+    "216": {"name": "Tunisia",      "flag": "🇹🇳"},
+    "218": {"name": "Libya",        "flag": "🇱🇾"},
+    "249": {"name": "Sudan",        "flag": "🇸🇩"},
+    # ── West Africa ──
+    "234": {"name": "Nigeria",      "flag": "🇳🇬"},
+    "233": {"name": "Ghana",        "flag": "🇬🇭"},
+    "221": {"name": "Senegal",      "flag": "🇸🇳"},
+    "225": {"name": "Côte d'Ivoire","flag": "🇨🇮"},
+    "222": {"name": "Mauritania",   "flag": "🇲🇷"},
+    "223": {"name": "Mali",         "flag": "🇲🇱"},
+    "226": {"name": "Burkina Faso", "flag": "🇧🇫"},
+    "227": {"name": "Niger",        "flag": "🇳🇪"},
+    "228": {"name": "Togo",         "flag": "🇹🇬"},
+    "229": {"name": "Benin",        "flag": "🇧🇯"},
+    "232": {"name": "Sierra Leone", "flag": "🇸🇱"},
+    "231": {"name": "Liberia",      "flag": "🇱🇷"},
+    "224": {"name": "Guinea",       "flag": "🇬🇳"},
+    "245": {"name": "Guinea-Bissau","flag": "🇬🇼"},
+    "238": {"name": "Cape Verde",   "flag": "🇨🇻"},
+    # ── Central Africa ──
+    "237": {"name": "Cameroon",     "flag": "🇨🇲"},
+    "243": {"name": "DR Congo",     "flag": "🇨🇩"},
+    "242": {"name": "Congo",        "flag": "🇨🇬"},
+    "240": {"name": "Eq. Guinea",   "flag": "🇬🇶"},
+    "241": {"name": "Gabon",        "flag": "🇬🇦"},
+    "236": {"name": "CAR",          "flag": "🇨🇫"},
+    "235": {"name": "Chad",         "flag": "🇹🇩"},
+    # ── East Africa ──
+    "254": {"name": "Kenya",        "flag": "🇰🇪"},
+    "255": {"name": "Tanzania",     "flag": "🇹🇿"},
+    "256": {"name": "Uganda",       "flag": "🇺🇬"},
+    "251": {"name": "Ethiopia",     "flag": "🇪🇹"},
+    "252": {"name": "Somalia",      "flag": "🇸🇴"},
+    "253": {"name": "Djibouti",     "flag": "🇩🇯"},
+    "257": {"name": "Burundi",      "flag": "🇧🇮"},
+    "250": {"name": "Rwanda",       "flag": "🇷🇼"},
+    "291": {"name": "Eritrea",      "flag": "🇪🇷"},
+    # ── Southern Africa ──
+    "27":  {"name": "South Africa", "flag": "🇿🇦"},
+    "258": {"name": "Mozambique",   "flag": "🇲🇿"},
+    "260": {"name": "Zambia",       "flag": "🇿🇲"},
+    "263": {"name": "Zimbabwe",     "flag": "🇿🇼"},
+    "267": {"name": "Botswana",     "flag": "🇧🇼"},
+    "264": {"name": "Namibia",      "flag": "🇳🇦"},
+    "266": {"name": "Lesotho",      "flag": "🇱🇸"},
+    "268": {"name": "Eswatini",     "flag": "🇸🇿"},
+    "244": {"name": "Angola",       "flag": "🇦🇴"},
+    "261": {"name": "Madagascar",   "flag": "🇲🇬"},
+    "230": {"name": "Mauritius",    "flag": "🇲🇺"},
+    "248": {"name": "Seychelles",   "flag": "🇸🇨"},
+    # ── Oceania ──
+    "61":  {"name": "Australia",    "flag": "🇦🇺"},
+    "64":  {"name": "New Zealand",  "flag": "🇳🇿"},
+    "679": {"name": "Fiji",         "flag": "🇫🇯"},
+    "675": {"name": "Papua NG",     "flag": "🇵🇬"},
+    "677": {"name": "Solomon Is.",  "flag": "🇸🇧"},
+    "678": {"name": "Vanuatu",      "flag": "🇻🇺"},
+    "676": {"name": "Tonga",        "flag": "🇹🇴"},
+    "685": {"name": "Samoa",        "flag": "🇼🇸"},
+    "686": {"name": "Kiribati",     "flag": "🇰🇮"},
+    "688": {"name": "Tuvalu",       "flag": "🇹🇻"},
+    "692": {"name": "Marshall Is.", "flag": "🇲🇭"},
+    "691": {"name": "Micronesia",   "flag": "🇫🇲"},
+    "680": {"name": "Palau",        "flag": "🇵🇼"},
 })
 
 services = load_json(SERVICES_FILE, {
@@ -2172,36 +2358,66 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sess.get("state") != "admin_upload_file":
         return
 
-    doc = update.message.document
-    if not doc.file_name.endswith(".txt"):
-        return await update.message.reply_text("❌ Only .txt files are supported.")
+    doc   = update.message.document
+    fname = (doc.file_name or "").lower()
 
-    file = await context.bot.get_file(doc.file_id)
-    content = await file.download_as_bytearray()
-    lines   = content.decode("utf-8", errors="ignore").split("\n")
+    if not (fname.endswith(".txt") or fname.endswith(".xlsx") or fname.endswith(".xls")):
+        return await update.message.reply_text("❌ Only .txt or .xlsx files are supported.")
 
     svc_id = (sess.get("data") or {}).get("serviceId", "other")
-    added = 0
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        if "|" in line:
-            parts = line.split("|")
-            num = parts[0].strip()
-            cc  = parts[1].strip() if len(parts) > 1 else get_country_code_from_number(num)
-            svc = parts[2].strip() if len(parts) > 2 else svc_id
-        else:
-            num = line
-            cc  = get_country_code_from_number(num)
-            svc = svc_id
+    added  = 0
+    file   = await context.bot.get_file(doc.file_id)
 
-        if not re.match(r"^\d{10,15}$", num) or not cc:
-            continue
-        numbers_by_cs.setdefault(cc, {}).setdefault(svc, [])
-        if num not in numbers_by_cs[cc][svc]:
-            numbers_by_cs[cc][svc].append(num)
-            added += 1
+    # ── XLSX / XLS ──
+    if fname.endswith(".xlsx") or fname.endswith(".xls"):
+        try:
+            import openpyxl, io
+            raw = await file.download_as_bytearray()
+            wb  = openpyxl.load_workbook(io.BytesIO(bytes(raw)), read_only=True, data_only=True)
+            ws  = wb.active
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                # Try every cell in the row for a phone number
+                for cell in row:
+                    if cell is None:
+                        continue
+                    num = re.sub(r"\D", "", str(cell))
+                    if not re.match(r"^\d{10,15}$", num):
+                        continue
+                    cc = get_country_code_from_number(num)
+                    if not cc:
+                        continue
+                    numbers_by_cs.setdefault(cc, {}).setdefault(svc_id, [])
+                    if num not in numbers_by_cs[cc][svc_id]:
+                        numbers_by_cs[cc][svc_id].append(num)
+                        added += 1
+                    break  # একটি row থেকে একটাই number নেওয়া হবে
+        except Exception as e:
+            logger.error(f"XLSX parse error: {e}")
+            return await update.message.reply_text(f"❌ Excel file read error: {e}")
+
+    # ── TXT ──
+    else:
+        raw_content = await file.download_as_bytearray()
+        lines = raw_content.decode("utf-8", errors="ignore").split("\n")
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if "|" in line:
+                parts = line.split("|")
+                num = parts[0].strip()
+                cc  = parts[1].strip() if len(parts) > 1 else get_country_code_from_number(num)
+                svc = parts[2].strip() if len(parts) > 2 else svc_id
+            else:
+                num = re.sub(r"\D", "", line)
+                cc  = get_country_code_from_number(num)
+                svc = svc_id
+            if not re.match(r"^\d{10,15}$", num) or not cc:
+                continue
+            numbers_by_cs.setdefault(cc, {}).setdefault(svc, [])
+            if num not in numbers_by_cs[cc][svc]:
+                numbers_by_cs[cc][svc].append(num)
+                added += 1
 
     await async_save_numbers()
     sess["state"] = None
